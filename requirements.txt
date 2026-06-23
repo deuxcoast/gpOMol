@@ -1,0 +1,17 @@
+# Battery Function-to-Function GP — requirements
+# Python >= 3.10 recommended
+
+# Core GP stack
+gpCAM~=8.4.0
+torch
+
+# Numerics
+
+# Data
+# pandas>=3.0.1
+
+# Plotting
+matplotlib>=3.10.8
+
+# System
+ipykernel
