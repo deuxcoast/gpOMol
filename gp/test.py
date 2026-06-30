@@ -1,7 +1,10 @@
-import numpy as np
+from variogram_screen import gp_loo_crps, gram_loo_crps, print_table, run_screen
+from wl_kernel import make_wl_candidate
 
-d = np.load("./referencing/20260617_130856_reference.npz")
-print(d.files)
-print("train_idx:", d["train_idx"].shape, "r_train:", d["r_train"].shape)
-print("test_idx:", d["test_idx"].shape, "r_test:", d["r_test"].shape)
-print("no index overlap:", len(set(d["train_idx"]) & set(d["test_idx"])) == 0)
+cands = [
+    make_wl_candidate("wl_h1_raw", h=1, normalize=False),
+    make_wl_candidate("wl_h1_norm", h=1, normalize=True),
+    make_wl_candidate("wl_h2_raw", h=2, normalize=False),
+]
+results = run_screen(cands, feats, z_referenced, sizes=atom_counts)
+print_table(results)

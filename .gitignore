@@ -2,4 +2,8 @@
 train_4M/
 *.png
 *.svg
+*.npy
+*.npz
 gpomol/
+__pycache__
+
