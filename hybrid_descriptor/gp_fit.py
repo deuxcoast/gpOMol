@@ -2,33 +2,33 @@
 gp_fit.py
 =========
 
-End-to-end orchestration tying the four steps together and wiring gpCAM's
-gp2Scale mode. This is the file you adapt to OMol25 I/O; the four component
-modules (extensive_mean, features, embedding_kernel, diagnostics) are meant to
-stay stable.
+End-to-end orchestration for a hybrid-descriptor GP on the FULL OMol25 train_4M
+split (~4M structures), wiring gpCAM's gp2Scale mode. The four component modules
+(extensive_mean, features, embedding_kernel, diagnostics) stay stable; this file
+holds the OMol25 I/O and the fit/predict flow.
 
-Data flow
----------
-    raw molecules ──► ExtensiveEnergyModel ──► intensive residual  (GP y_data)
-                 └──► HybridFeatureAssembler ──► standardised features
-                                             └──► FeatureReducer (PCA) ──► X (N, D)
-    X, residual ──► [FALSIFICATION GATE] ──► gp2Scale GPOptimizer + Wendland
-                                          ──► block-MCMC training
-    prediction: GP posterior on residual  +  ExtensiveEnergyModel  = physical E,
-                and posterior variance = the calibrated UQ that is the whole point.
+Decisions baked in for full train_4M (see project notes):
+  * charges  = Loewdin (NBO is ~33% missing, concentrated in open-shell/metal/
+               solvated subsets -> using it would bias the sample to organics).
+  * graphs   = geometry-derived (ASE covalent-radius perception); SMILES is only
+               ~2% recoverable from provenance, so no SMILES path. Multi-molecule
+               records (solvated proteins, electrolyte shells) stay as multi-
+               component graphs; WL handles disconnected components.
+  * mean     = element counts + NET CHARGE + SPIN. train_4M spans charge/spin
+               states whose energy effect is large and must live in the extensive
+               mean, not the GP residual.
 
-What you must supply for OMol25 (marked TODO below)
----------------------------------------------------
-  * Z_lists        : per-molecule atomic numbers
-  * graphs         : per-molecule (adjacency, node_labels) from RDKit/ASE bonds
-  * positions_list : per-molecule (n_atoms, 3) coordinates
-  * charges_list   : per-molecule Loewdin or NBO partial charges (NOT Mulliken)
-  * y_total        : per-molecule DFT total energies
+THE CRUX for train_4M: an EXACT GP at N~4M is feasible only if the covariance
+matrix is genuinely sparse. storage ~ 12 * s* * N^2 bytes, so at N=4e6:
+  s*=0.06 -> ~11 TB (fits 40 TB) ;  s*=0.2 -> ~38 TB (edge) ;  s*=0.5 -> ~96 TB (no).
+Prior evidence had s* flat ~0.5 under broad diversity. So the plan is organised to
+MEASURE and, if needed, IMPOSE sparsity (short support radius) before launching the
+full run — see diagnostics.sparsity_accuracy_sweep.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
 import numpy as np
@@ -43,42 +43,135 @@ from extensive_mean import ExtensiveEnergyModel
 from features import HybridFeatureAssembler
 
 # ----------------------------------------------------------------------------
-# 0. OMol25 loader — TODO: fill in with fairchem AseDBDataset access
+# Data bundle
 # ----------------------------------------------------------------------------
 
 
-def load_omol25_subset(n: int, split: str = "train"):
+@dataclass
+class MolBatch:
+    """Everything the pipeline needs about a set of structures. y_total /
+    net_charges / spins may be absent at pure-predict time."""
+
+    Z_lists: list
+    graphs: list
+    positions_list: list
+    charges_list: list
+    y_total: Optional[np.ndarray] = None
+    net_charges: Optional[np.ndarray] = None
+    spins: Optional[np.ndarray] = None
+
+    def __len__(self):
+        return len(self.Z_lists)
+
+    def extra_context(self):
+        """(net_charge, spin) tuples for the extensive-mean extra features."""
+        nc = self.net_charges if self.net_charges is not None else np.zeros(len(self))
+        sp = self.spins if self.spins is not None else np.ones(len(self))
+        return list(zip(nc, sp))
+
+
+def charge_spin_features(Z_list, ctx) -> np.ndarray:
+    """Extensive-mean extra features: [net_charge, spin_multiplicity]. Low-order
+    on purpose — this is a prior mean, not a model of the physics."""
+    charge, spin = (0.0, 1.0) if ctx is None else (float(ctx[0]), float(ctx[1]))
+    return np.array([charge, spin], dtype=float)
+
+
+# ----------------------------------------------------------------------------
+# 0. OMol25 I/O — geometry-derived graphs, Loewdin charges, full diversity
+# ----------------------------------------------------------------------------
+
+
+def build_graph(atoms, cutoff_mult: float = 1.2):
     """
-    RETURN: Z_lists, graphs, positions_list, charges_list, y_total
+    Geometry-derived connectivity for one record via ASE covalent-radius
+    perception. Returns (adjacency, node_labels):
+        adjacency[i]   = sorted list of bonded neighbour indices of atom i
+        node_labels[i] = atomic number (WL = pure topology; electronics live in
+                         the charge channel, not the label)
 
-    Sketch (adapt to your working explore_omol25.py / AseDBDataset setup):
-
-        from fairchem.core.datasets import AseDBDataset
-        ds = AseDBDataset({"src": "<path>"})
-        Z_lists, graphs, pos, charges, y = [], [], [], [], []
-        for i in random_indices(len(ds), n):
-            atoms = ds.get_atoms(i)
-            Z_lists.append(atoms.get_atomic_numbers())
-            pos.append(atoms.get_positions())
-            charges.append(atoms.info["loewdin_charges"])     # or "nbo_charges"
-            y.append(atoms.info["energy"])
-            graphs.append(build_graph(atoms))                 # adjacency + labels
+    cutoff_mult scales the covalent radii. 1.2 is a reasonable default; tighten
+    toward ~1.0 to cut spurious bonds in metal/charged cases, loosen to catch
+    long bonds. Multi-molecule records naturally yield multiple components; WL
+    handles that (the per-atom normalisation keeps it intensive).
     """
-    raise NotImplementedError("Wire this to your AseDBDataset / OMol25 access.")
+    from ase.neighborlist import build_neighbor_list, natural_cutoffs
+
+    cutoffs = natural_cutoffs(atoms, mult=cutoff_mult)
+    nl = build_neighbor_list(atoms, cutoffs, self_interaction=False, bothways=True)
+    n = len(atoms)
+    adjacency = [[] for _ in range(n)]
+    for i in range(n):
+        neigh, _ = nl.get_neighbors(i)
+        adjacency[i] = sorted({int(j) for j in neigh if j != i})
+    node_labels = atoms.get_atomic_numbers().tolist()
+    return adjacency, node_labels
 
 
-def build_graph(atoms):
+def n_connected_components(adjacency) -> int:
+    """Number of connected components (molecules) in a geometry-derived graph."""
+    from scipy.sparse import lil_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    n = len(adjacency)
+    A = lil_matrix((n, n), dtype=np.int8)
+    for i, nb in enumerate(adjacency):
+        for j in nb:
+            A[i, j] = 1
+    return connected_components(A.tocsr(), directed=False, return_labels=False)
+
+
+def load_omol25_subset(
+    src: str = "../train_4M",
+    n: int = 100_000,
+    seed: int = 0,
+    charge_key: str = "lowdin_charges",
+    cutoff_mult: float = 1.2,
+    size_cap: Optional[int] = None,
+) -> "MolBatch":
     """
-    TODO: return (adjacency, node_labels) for one molecule.
-      adjacency[i]  = list of bonded neighbour indices of atom i
-      node_labels[i] = initial WL label (atomic number is a fine default)
+    Random subsample of an OMol25 aselmdb split -> MolBatch. Full diversity: no
+    chemistry filtering. Skips only records missing/NaN in `charge_key` (keeps the
+    charge channel clean) and, if `size_cap` is set, records larger than it (guards
+    against pathological giant solvated systems blowing up memory).
 
-    Build bonds from RDKit (if SMILES/mol available) or from ASE via covalent-
-    radius neighbour perception (ase.neighborlist.natural_cutoffs +
-    build_neighbor_list). Connectivity-only; geometry lives in the distance
-    histogram, not here.
+    Accessor is atoms.get_potential_energy() (calc 'energy') and atoms.info[...]
+    for charges/charge/spin, matching the train_4M schema.
     """
-    raise NotImplementedError("Provide molecular-graph construction for OMol25.")
+    from fairchem.core.datasets import AseDBDataset
+
+    ds = AseDBDataset({"src": src})
+    N = len(ds)
+    print(f"train_4M: {N:,} structures; sampling {min(n, N):,}")
+    idxs = np.random.default_rng(seed).choice(N, size=min(n, N), replace=False)
+
+    Z, G, P, Q, Y, NC, SP = [], [], [], [], [], [], []
+    skipped = n_multi = 0
+    for i in idxs:
+        atoms = ds.get_atoms(int(i))
+        if size_cap and len(atoms) > size_cap:
+            skipped += 1
+            continue
+        q = atoms.info.get(charge_key)
+        if q is None or np.any(np.isnan(np.asarray(q, dtype=float))):
+            skipped += 1
+            continue
+        adj_lab = build_graph(atoms, cutoff_mult)
+        Z.append(atoms.get_atomic_numbers().tolist())
+        P.append(atoms.get_positions())
+        Q.append(np.asarray(q, dtype=float))
+        Y.append(float(atoms.get_potential_energy()))
+        NC.append(float(atoms.info.get("charge", 0)))
+        SP.append(float(atoms.info.get("spin", 1)))
+        G.append(adj_lab)
+        if n_connected_components(adj_lab[0]) > 1:
+            n_multi += 1
+
+    print(
+        f"  kept {len(Y):,}  (skipped {skipped:,}); "
+        f"multi-molecule records: {n_multi}/{len(Y)} = {n_multi/max(len(Y),1):.1%}"
+    )
+    return MolBatch(Z, G, P, Q, np.array(Y), np.array(NC), np.array(SP))
 
 
 # ----------------------------------------------------------------------------
@@ -96,28 +189,49 @@ class HybridPreprocessor:
     assembler: HybridFeatureAssembler = None
     reducer: FeatureReducer = None
 
-    def fit(self, Z_lists, graphs, positions_list, charges_list, y_total):
-        self.mean_model = ExtensiveEnergyModel().fit(Z_lists, y_total)
-        residual = self.mean_model.residual(Z_lists, y_total)
+    def fit(self, batch: "MolBatch"):
+        ctx = batch.extra_context()
+        self.mean_model = ExtensiveEnergyModel(
+            extra_feature_fn=charge_spin_features
+        ).fit(batch.Z_lists, batch.y_total, extra_context=ctx)
+        residual = self.mean_model.residual(
+            batch.Z_lists, batch.y_total, extra_context=ctx
+        )
 
         self.assembler = HybridFeatureAssembler(
             wl_depth=self.wl_depth, wl_buckets=self.wl_buckets
         )
-        X_raw = self.assembler.fit_transform(graphs, positions_list, charges_list)
+        X_raw = self.assembler.fit_transform(
+            batch.graphs, batch.positions_list, batch.charges_list
+        )
 
         self.reducer = FeatureReducer(n_components=self.n_components).fit(X_raw)
         X = self.reducer.transform(X_raw)
         return X, residual
 
-    def transform(self, Z_lists, graphs, positions_list, charges_list):
-        X_raw = self.assembler.transform(graphs, positions_list, charges_list)
+    def transform(self, batch: "MolBatch"):
+        X_raw = self.assembler.transform(
+            batch.graphs, batch.positions_list, batch.charges_list
+        )
         return self.reducer.transform(X_raw)
 
-    def wl_only_embedding(self, graphs, positions_list, charges_list):
+    def residual(self, batch: "MolBatch"):
+        return self.mean_model.residual(
+            batch.Z_lists, batch.y_total, extra_context=batch.extra_context()
+        )
+
+    def extensive_energy(self, batch: "MolBatch"):
+        return self.mean_model.predict(
+            batch.Z_lists, extra_context=batch.extra_context()
+        )
+
+    def wl_only_embedding(self, batch: "MolBatch"):
         """Reduced embedding using ONLY the WL channel (zero out the rest), for
         the kNN-skill-vs-WL diagnostic. Reuses the fitted standardiser/reducer so
         the comparison is apples-to-apples in the same reduced space."""
-        X_raw = self.assembler.raw_matrix(graphs, positions_list, charges_list)
+        X_raw = self.assembler.raw_matrix(
+            batch.graphs, batch.positions_list, batch.charges_list
+        )
         X_std = (X_raw - self.assembler.mean_) / self.assembler.std_
         masked = np.zeros_like(X_std)
         wl = self.assembler.slices_["wl"]
@@ -131,13 +245,10 @@ class HybridPreprocessor:
 
 
 def gate_then_fit(
-    Z_lists,
-    graphs,
-    positions_list,
-    charges_list,
-    y_total,
-    target_N: int = 1_500_000,
+    batch: "MolBatch",
+    target_N: int = 4_000_000,
     n_components: int = 15,
+    wendland_k: int = 2,
     dask_client=None,
     gp2Scale_batch_size: int = 10_000,
     run_gate: bool = True,
@@ -151,23 +262,26 @@ def gate_then_fit(
     energies later); `report` is the FalsificationReport (None if run_gate=False).
     """
     pre = HybridPreprocessor(n_components=n_components)
-    X, residual = pre.fit(Z_lists, graphs, positions_list, charges_list, y_total)
+    X, residual = pre.fit(batch)
 
     # ---- Falsification gate (cheap; do it before spending cluster time) -------
     report = None
     if run_gate:
-        X_wl = pre.wl_only_embedding(graphs, positions_list, charges_list)
+        X_wl = pre.wl_only_embedding(batch)
         report = run_falsification(X, X_wl, residual, target_N=target_N)
         print(report.summary())
         if not report.all_passed:
             print(
                 "\nGate failed — returning without fitting. "
-                "Fix the descriptor before spending compute."
+                "Fix the descriptor / impose shorter support before compute."
             )
             return None, pre, report
 
     # ---- Kernel + PD guard ----------------------------------------------------
-    kernel = make_wendland_mahalanobis(dim=n_components)
+    # explicit backend = dimension-correct Wendland, PD on R^n_components
+    kernel = make_wendland_mahalanobis(
+        dim=n_components, k=wendland_k, backend="explicit"
+    )
     hp_bounds = default_hp_bounds(X, residual)
     init_hps = np.concatenate(
         [[float(np.var(residual))], 0.5 * (hp_bounds[1:, 0] + hp_bounds[1:, 1])]
@@ -249,9 +363,7 @@ def _train_block_mcmc(gpo, hp_bounds, init_hps, n_updates: int = 200):
 # ----------------------------------------------------------------------------
 
 
-def predict_energy(
-    gpo, pre: HybridPreprocessor, Z_lists, graphs, positions_list, charges_list
-):
+def predict_energy(gpo, pre: HybridPreprocessor, batch: "MolBatch"):
     """
     Returns (E_pred, E_std). The GP predicts the intensive residual; we add back
     the extensive mean for the physical energy, and pass the posterior standard
@@ -259,20 +371,18 @@ def predict_energy(
     predictive uncertainty comes from the GP. That posterior std IS the
     calibrated UQ this whole pipeline exists to deliver.
     """
-    X = pre.transform(Z_lists, graphs, positions_list, charges_list)
-    post = gpo.posterior_mean(X)
-    resid_mean = post["m(x)"]
+    X = pre.transform(batch)
+    resid_mean = gpo.posterior_mean(X)["m(x)"]
     var = gpo.posterior_covariance(X, variance_only=True)["v(x)"]
-    E_ext = pre.mean_model.predict(Z_lists)
-    return E_ext + resid_mean, np.sqrt(np.maximum(var, 0.0))
+    return pre.extensive_energy(batch) + resid_mean, np.sqrt(np.maximum(var, 0.0))
 
 
-def validate(gpo, pre, Z_lists, graphs, positions_list, charges_list, y_total):
+def validate(gpo, pre, batch: "MolBatch"):
     """RMSE and CRPS on held-out molecules, computed on the residual scale via
-    gpCAM's built-ins (energy-scale RMSE is identical since the mean is a constant
-    shift per molecule)."""
-    X = pre.transform(Z_lists, graphs, positions_list, charges_list)
-    residual = pre.mean_model.residual(Z_lists, y_total)
+    gpCAM's built-ins (energy-scale RMSE is identical since the mean is a
+    per-molecule deterministic shift)."""
+    X = pre.transform(batch)
+    residual = pre.residual(batch)
     return {
         "rmse": float(gpo.rmse(X, residual)),
         "crps": float(gpo.crps(X, residual)),

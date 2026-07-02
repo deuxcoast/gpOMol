@@ -295,6 +295,130 @@ def feasibility(s_star: float, target_N: int) -> dict:
     }
 
 
+def sparsity_accuracy_sweep(
+    X: np.ndarray, y_resid: np.ndarray, target_N: int = 4_000_000, n_radii: int = 25
+) -> dict:
+    """
+    The decisive tool for the full-4M question: does a support radius exist that is
+    BOTH sparse enough to store at target_N AND long enough to capture the
+    correlation structure?
+
+    For a sweep of candidate support radii r it reports, at each r:
+        s*(r)            = pairwise density = non-zero fraction of the matrix
+        storage_TB(r)    = BYTES_PER_NNZ * s*(r) * target_N^2   (vs BUDGET_TB)
+        captured(r)      = gamma(r)/sill in [0,1]: how far toward full
+                           decorrelation r reaches. captured ~ 1 means pairs beyond
+                           r are ~uncorrelated, so truncating support at r is
+                           (nearly) free; captured << 1 means truncating at r
+                           discards real correlation -> accuracy loss.
+
+    Then it names two radii:
+        r_full   = smallest r with captured >= 0.95  (~ the variogram range): the
+                   shortest support that keeps essentially all correlation. s* and
+                   storage here tell you if EXACT full-accuracy GP fits at target_N.
+        r_budget = largest r whose storage <= BUDGET_TB: the most correlation you
+                   can afford. captured(r_budget) is the accuracy you'd retain if
+                   forced to impose sparsity to fit the budget.
+
+    If r_full fits the budget you are done. If not, the gap between captured(r_full)
+    and captured(r_budget) is exactly the accuracy you trade away to run at 4M.
+    """
+    v = semivariogram(X, y_resid, n_bins=n_radii)
+    lags, gamma, sill = v["lags"], v["gamma"], (v["sill"] or 1.0)
+
+    D = _pairwise_euclidean(X)
+    n = len(X)
+    off = D[~np.eye(n, dtype=bool)]
+
+    # captured(r) = gamma(r)/sill, but the empirical variogram is noisy in
+    # under-populated short-lag bins (a single sparse bin can spike to the sill
+    # and fake a short range). A variogram is theoretically non-decreasing to the
+    # sill, so robustify: 3-point median filter (kills isolated spikes) then
+    # cumulative max (enforces monotonicity). This prevents one noisy bin from
+    # declaring "full correlation captured" at a tiny radius.
+    valid = ~np.isnan(gamma)
+    lags_v, gamma_v = lags[valid], gamma[valid]
+    cap_raw = np.clip(gamma_v / sill, 0.0, 1.0)
+    cap_med = np.array(
+        [np.median(cap_raw[max(0, i - 1) : i + 2]) for i in range(len(cap_raw))]
+    )
+    cap = np.maximum.accumulate(cap_med)
+
+    budget_tb = BUDGET_TB
+    table = []
+    for r, c in zip(lags_v, cap):
+        s = float(np.mean(off <= r))
+        storage_tb = BYTES_PER_NNZ * s * (target_N**2) / 1e12
+        table.append(
+            {
+                "radius": float(r),
+                "s_star": s,
+                "storage_TB": storage_tb,
+                "captured": float(c),
+            }
+        )
+
+    def _first(pred):
+        return next((row for row in table if pred(row)), None)
+
+    def _last(pred):
+        return next((row for row in reversed(table) if pred(row)), None)
+
+    r_full = _first(lambda row: row["captured"] >= 0.95) or table[-1]
+    r_budget = _last(lambda row: row["storage_TB"] <= budget_tb)
+
+    full_fits = r_full["storage_TB"] <= budget_tb
+    return {
+        "target_N": int(target_N),
+        "table": table,
+        "r_full": r_full,  # shortest full-correlation support
+        "r_budget": r_budget,  # most correlation affordable within budget
+        "full_accuracy_fits_budget": bool(full_fits),
+        "accuracy_traded": (
+            None
+            if full_fits or r_budget is None
+            else r_full["captured"] - r_budget["captured"]
+        ),
+    }
+
+
+def format_sweep(sw: dict) -> str:
+    L = [
+        f"SPARSITY / ACCURACY SWEEP  (target N = {sw['target_N']:.0e}, "
+        f"budget {BUDGET_TB:.0f} TB)",
+        f"  {'radius':>8}{'s*':>8}{'storage_TB':>12}{'captured':>10}",
+    ]
+    for row in sw["table"]:
+        flag = "" if row["storage_TB"] <= BUDGET_TB else "  <-over budget"
+        L.append(
+            f"  {row['radius']:>8.3g}{row['s_star']:>8.3f}"
+            f"{row['storage_TB']:>12.1f}{row['captured']:>10.2f}{flag}"
+        )
+    rf, rb = sw["r_full"], sw["r_budget"]
+    L.append("-" * 46)
+    L.append(
+        f"  r_full  (captures ~all correlation): r={rf['radius']:.3g} "
+        f"s*={rf['s_star']:.3f} storage={rf['storage_TB']:.1f} TB"
+    )
+    if sw["full_accuracy_fits_budget"]:
+        L.append("  => EXACT full-accuracy GP FITS at target N. Proceed.")
+    elif rb is not None:
+        L.append(
+            f"  r_budget(max affordable):            r={rb['radius']:.3g} "
+            f"s*={rb['s_star']:.3f} captured={rb['captured']:.2f}"
+        )
+        L.append(
+            f"  => full accuracy does NOT fit; imposing sparsity to fit "
+            f"budget trades away ~{sw['accuracy_traded']:.0%} of correlation."
+        )
+    else:
+        L.append(
+            "  => even the smallest radius exceeds budget at target N; "
+            "reduce N or raise the storage budget / node count."
+        )
+    return "\n".join(L)
+
+
 # ----------------------------------------------------------------------------
 # Orchestrator
 # ----------------------------------------------------------------------------
