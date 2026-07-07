@@ -143,18 +143,36 @@ class OMol25Loader:
         self.F = self.soap.get_number_of_features()
 
     # -------- reference model E ~ composition + charge + spin -------- #
+    def _design_vec(self, a):
+        """Composition over self.species + [other, charge, spin]. Unknown Z -> 'other'
+        (should never fire if species is a full superset, but prevents a hard crash)."""
+        S = len(self.species)
+        v = np.zeros(S + 3)  # [species..., other, charge, spin]
+        for z in a.get_atomic_numbers():
+            j = self._col.get(int(z))
+            if j is None:
+                v[S] += 1
+                if int(z) not in self._unknown_Z:
+                    self._unknown_Z.add(int(z))
+                    print(
+                        f"[loader] WARNING: element Z={int(z)} not in species list "
+                        f"-> routed to 'other'. Add it to species for SOAP to see it.",
+                        flush=True,
+                    )
+            else:
+                v[j] += 1
+        v[-2] = a.info.get("charge", 0)
+        v[-1] = a.info.get("spin", 1)
+        return v
+
     def _fit_reference(self, n):
         idx = self.perm[: min(n, self.N)]
-        col = {z: j for j, z in enumerate(self.species)}
+        self._col = {z: j for j, z in enumerate(self.species)}
+        self._unknown_Z = set()
         rows, E = [], []
         for i in idx:
             a = self.ds.get_atoms(int(i))
-            v = np.zeros(len(self.species) + 2)
-            for z in a.get_atomic_numbers():
-                v[col[int(z)]] += 1
-            v[-2] = a.info.get("charge", 0)
-            v[-1] = a.info.get("spin", 1)
-            rows.append(v)
+            rows.append(self._design_vec(a))
             try:
                 E.append(float(a.get_potential_energy()))
             except Exception:
@@ -162,17 +180,11 @@ class OMol25Loader:
         C, E = np.array(rows), np.array(E)
         ok = np.isfinite(E)
         self.ref_coef, *_ = np.linalg.lstsq(C[ok], E[ok], rcond=None)
-        self._col = col
         resid = E[ok] - C[ok] @ self.ref_coef
         self.resid_std = float(resid.std())  # sets GP signal scale / sigma^2
 
     def _reference_energy(self, a):
-        v = np.zeros(len(self.species) + 2)
-        for z in a.get_atomic_numbers():
-            v[self._col[int(z)]] += 1
-        v[-2] = a.info.get("charge", 0)
-        v[-1] = a.info.get("spin", 1)
-        return v @ self.ref_coef
+        return self._design_vec(a) @ self.ref_coef
 
     # -------- embedding: PCA fit on a SOAP SAMPLE (full F held only for the sample) -------- #
     def _fit_embedding(self, n_mols):
