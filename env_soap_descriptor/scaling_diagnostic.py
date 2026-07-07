@@ -74,33 +74,30 @@ def dedup_environments(Z, mol_of, tol=1e-2, seed=0):
 
 
 # ---------------------- neighbor / nnz-per-row stats ------------------------- #
-def nnz_per_row_stats(Z, radius, n_probe=4000, seed=0, explosion_cap=200_000):
+def nnz_per_row_stats(
+    Z, radius, n_probe=3000, seed=0, explosion_cap=200_000, workers=-1
+):
     """
-    Explosion-safe estimate of the nnz/row distribution of the radius-`radius`
-    neighbor graph, WITHOUT materializing the full graph. We build the tree once
-    (O(n log n) memory-light) and count neighbors for a random probe set of rows.
-    If any probe row exceeds `explosion_cap`, we short-circuit -- that alone is a
-    no-go signal (the graph is too dense to store).
+    Explosion-safe estimate of the nnz/row distribution of the radius-`radius` neighbor
+    graph, WITHOUT materializing the full graph. Build the tree once and count neighbors
+    for a random probe set of rows in ONE batched, parallel query (return_length=True
+    returns only counts, so memory is O(n_probe) regardless of density). If the median
+    probe count exceeds `explosion_cap`, that alone is a no-go (too dense to store).
     """
     rng = np.random.default_rng(seed)
     tree = cKDTree(Z)
     probes = rng.choice(len(Z), size=min(n_probe, len(Z)), replace=False)
-    counts = np.empty(len(probes), dtype=np.int64)
-    exploded = False
-    for j, i in enumerate(probes):
-        nb = tree.query_ball_point(Z[i], r=radius, return_length=True)
-        counts[j] = nb
-        if nb > explosion_cap:
-            exploded = True
-            break
-    counts = counts[: j + 1]
+    counts = tree.query_ball_point(
+        Z[probes], r=radius, return_length=True, workers=workers
+    )
+    counts = np.asarray(counts, dtype=np.int64)
     return {
         "radius": float(radius),
         "mean": float(counts.mean()),
         "median": float(np.median(counts)),
         "p95": float(np.percentile(counts, 95)),
         "max": int(counts.max()),
-        "exploded": exploded,
+        "exploded": bool(np.median(counts) > explosion_cap),
     }
 
 
@@ -116,57 +113,109 @@ def _partition_energy(A, y, ridge=1e-3):
     return e
 
 
-def skill_at_radius(Z, A, y, radius, e_part, train_mask, k_smooth_cap=64, seed=0):
+def _skill_from_knn(
+    Z,
+    A,
+    y,
+    dist,
+    idx,
+    e_part,
+    env_is_train,
+    train_mean,
+    scored_mol,
+    scored_env_idx,
+    radius,
+    k_smooth_cap=64,
+):
     """
-    Held-out molecule R^2 of the radius-rho Nadaraya-Watson aggregate predictor.
-    Uses only TRAIN environments' partitioned energies to smooth; scores held-out
-    molecules. Neighbor smoothing capped at k_smooth_cap for cost control.
+    Skill at radius rho from a PRECOMPUTED k-NN neighborhood (dist, idx of shape (S,k)).
+    Thresholding cached neighbors by radius is bounded in memory (O(S*k)) regardless of
+    density -- the radius-ball query was what OOM-ed. Fully vectorized, no per-env loop.
     """
-    tree = cKDTree(Z)
-    e_smooth = np.empty(len(Z))
-    for i in range(len(Z)):
-        idx = tree.query_ball_point(Z[i], r=radius)
-        idx = [j for j in idx if train_mask[j]]
-        if len(idx) == 0:
-            e_smooth[i] = e_part[train_mask].mean()
-        else:
-            if len(idx) > k_smooth_cap:
-                idx = list(
-                    np.random.default_rng(seed + i).choice(
-                        idx, k_smooth_cap, replace=False
-                    )
-                )
-            e_smooth[i] = e_part[idx].mean()
-    y_hat = A @ e_smooth
-    test_mol = ~np.asarray(
-        A @ train_mask.astype(float) == (A @ np.ones(len(Z)))
-    )  # any test env
-    # simpler: score molecules whose environments are majority held-out
-    mol_test = (A @ (~train_mask).astype(float)) > 0
-    yt, yh = y[mol_test], y_hat[mol_test]
+    valid = (dist < radius) & env_is_train[idx]  # (S,k) train neighbors in support
+    if k_smooth_cap < idx.shape[1]:  # keep the nearest k_smooth_cap
+        keep = np.zeros_like(valid)
+        keep[:, :k_smooth_cap] = True
+        valid &= keep
+    e_vals = e_part[idx]  # (S,k)
+    counts = valid.sum(axis=1)
+    sums = (e_vals * valid).sum(axis=1)
+    e_scored = np.where(counts > 0, sums / np.maximum(counts, 1), train_mean)
+    e_full = np.zeros(len(Z))
+    e_full[scored_env_idx] = e_scored
+    y_hat = A[scored_mol] @ e_full
+    yt = y[scored_mol]
     if len(yt) < 5 or np.var(yt) == 0:
         return -np.inf
-    ss_res = np.sum((yt - yh) ** 2)
-    ss_tot = np.sum((yt - yt.mean()) ** 2)
-    return 1.0 - ss_res / ss_tot
+    return 1.0 - np.sum((yt - y_hat) ** 2) / np.sum((yt - yt.mean()) ** 2)
 
 
-def skill_preserving_radius(Z, A, y, radius_grid, skill_tol=0.02, seed=0):
+def skill_preserving_radius(
+    Z,
+    A,
+    y,
+    radius_grid,
+    skill_tol=0.02,
+    n_scored_mol=2000,
+    k_query=200,
+    workers=-1,
+    seed=0,
+    verbose=True,
+):
     """
     Sweep radii, return the SMALLEST radius within `skill_tol` R^2 of the best.
     Smallest-within-tolerance is deliberate: it is the sparsest kernel that keeps skill,
     i.e. the honest rho* the sparsity-preferring MCMC prior would target.
+
+    Scales to 10^6: molecule-level 80/20 split; score only a subsample of test molecules;
+    build the KD-tree once; do ONE bounded k-NN query (k=k_query) and threshold it per
+    radius. Memory is O(n_scored_mol * atoms/mol * k_query), independent of density.
     """
     rng = np.random.default_rng(seed)
-    n_env = len(Z)
-    train_mask = rng.random(n_env) < 0.8
+    n_mol, n_env = A.shape
+    train_mol_mask = rng.random(n_mol) < 0.8
+    env_is_train = (A.T @ train_mol_mask.astype(float)) > 0.5  # env in a train molecule
     e_part = _partition_energy(A, y)
-    skills = np.array(
-        [
-            skill_at_radius(Z, A, y, r, e_part, train_mask, seed=seed)
-            for r in radius_grid
-        ]
+    train_mean = e_part[env_is_train].mean()
+
+    test_mol = np.where(~train_mol_mask)[0]
+    scored_mol = (
+        test_mol
+        if len(test_mol) <= n_scored_mol
+        else rng.choice(test_mol, n_scored_mol, replace=False)
     )
+    scored_env_idx = np.unique(A[scored_mol].indices)
+
+    if verbose:
+        print(
+            f"    [skill] n_env={n_env} scored_mol={len(scored_mol)} "
+            f"scored_env={len(scored_env_idx)} — tree + one k-NN query (k={k_query})...",
+            flush=True,
+        )
+    tree = cKDTree(Z)
+    k = min(k_query, n_env)
+    dist, idx = tree.query(Z[scored_env_idx], k=k, workers=workers)
+    dist = np.atleast_2d(dist)
+    idx = np.atleast_2d(idx)
+
+    skills = np.empty(len(radius_grid))
+    for j, r in enumerate(radius_grid):
+        skills[j] = _skill_from_knn(
+            Z,
+            A,
+            y,
+            dist,
+            idx,
+            e_part,
+            env_is_train,
+            train_mean,
+            scored_mol,
+            scored_env_idx,
+            r,
+        )
+        if verbose:
+            print(f"    [skill] radius={r:.2f}  R2={skills[j]:+.4f}", flush=True)
+
     best = np.nanmax(skills)
     ok = np.where(skills >= best - skill_tol)[0]
     star = int(ok.min()) if len(ok) else int(np.nanargmax(skills))
@@ -194,30 +243,47 @@ def run_scaling_test(
     D=20,
     radius_grid=None,
     dedup_tol=1e-2,
+    n_scored_mol=2000,
+    workers=-1,
+    fit_embedding=True,
     seed=0,
 ):
     """
-    make_population(n_mol, seed) -> (X_raw, mol_of, y_mol)   [your OMol25 loader or synthetic]
-    Runs the 1e5 -> 1e6 test (scale n_mol_grid up on the cluster). Fits ONE embedding
-    on the largest population so the metric is shared across N (apples to apples).
+    make_population(n_mol, seed) -> (X_raw_or_Z, mol_of, y_mol).
+    If fit_embedding=True, X is raw features and one shared PCA embedding (D) is fit on the
+    largest population. If fit_embedding=False (the OMol25Loader path), X is ALREADY the
+    D-dim embedding (fit once inside the loader) and is used as-is.
     Returns the per-N table plus a verdict from a log-log fit of nnz/row(rho*, N).
     """
     from env_features_kernel import fit_env_embedding
 
     if radius_grid is None:
-        radius_grid = np.linspace(0.3, 4.0, 12)
+        radius_grid = np.linspace(0.5, 4.0, 8)
 
-    # shared embedding fit on the largest population
-    X_big, mol_big, _ = make_population(max(n_mol_grid), seed=seed)
-    emb = fit_env_embedding(X_big, D=D)
+    emb = None
+    if fit_embedding:
+        print(
+            f"[setup] fitting shared embedding (D={D}) on largest population "
+            f"(n_mol={max(n_mol_grid)})...",
+            flush=True,
+        )
+        X_big, _, _ = make_population(max(n_mol_grid), seed=seed)
+        emb = fit_env_embedding(X_big, D=D)
 
     rows = []
     for n_mol in n_mol_grid:
+        print(f"\n[N={n_mol}] loading + embedding...", flush=True)
         X, mol_of, y = make_population(n_mol, seed=seed)
-        Z = emb.transform(X)
+        Z = emb.transform(X) if emb is not None else X  # loader already embedded
         A = _membership_matrix(mol_of, n_mol)
 
-        rho, skills, star = skill_preserving_radius(Z, A, y, radius_grid, seed=seed)
+        rho, skills, star = skill_preserving_radius(
+            Z, A, y, radius_grid, n_scored_mol=n_scored_mol, workers=workers, seed=seed
+        )
+        print(
+            f"[N={n_mol}] rho*={rho:.2f}  measuring nnz/row (raw + dedup)...",
+            flush=True,
+        )
         s_raw = nnz_per_row_stats(Z, rho, seed=seed)
 
         Zd, mold, mult, n_ded = dedup_environments(Z, mol_of, tol=dedup_tol, seed=seed)
@@ -295,8 +361,12 @@ if __name__ == "__main__":
         return synthetic_environments(n, dup_fraction=0.4, seed=seed)
 
     for name, pop in [("clean", clean), ("leaky", leaky)]:
+        print(
+            f"\n################  {name.upper()} population  ################",
+            flush=True,
+        )
         rows, v = run_scaling_test(pop, n_mol_grid=(1500, 4500, 13500), D=20)
-        print(f"\n=== {name} population ===")
+        print(f"\n=== {name} population summary ===")
         for r in rows:
             print(
                 f" n_mol={r.n_mol:6d} n_env={r.n_env:7d} dedup={r.n_env_dedup:7d} "
