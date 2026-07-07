@@ -324,27 +324,25 @@ def sparsity_accuracy_sweep(
     and captured(r_budget) is exactly the accuracy you trade away to run at 4M.
     """
     v = semivariogram(X, y_resid, n_bins=n_radii)
-    lags, gamma, sill = v["lags"], v["gamma"], (v["sill"] or 1.0)
+    lags, gamma = v["lags"], v["gamma"]
 
     D = _pairwise_euclidean(X)
     n = len(X)
     off = D[~np.eye(n, dtype=bool)]
 
-    # captured(r) = gamma(r)/sill, but the empirical variogram is noisy in
-    # under-populated short-lag bins (a single sparse bin can spike to the sill
-    # and fake a short range). A variogram is theoretically non-decreasing to the
-    # sill, so robustify: 3-point median filter (kills isolated spikes) then
-    # cumulative max (enforces monotonicity). This prevents one noisy bin from
-    # declaring "full correlation captured" at a tiny radius.
+    # captured(r) = how far toward the sill the variogram has climbed by radius r.
+    # Robustness: (1) estimate the sill as the MEDIAN of the far-half lags, not a
+    # single max bin (a lone noisy far bin shouldn't define it); (2) light moving
+    # average; (3) cumulative max, since a variogram is non-decreasing to the sill.
     valid = ~np.isnan(gamma)
     lags_v, gamma_v = lags[valid], gamma[valid]
-    cap_raw = np.clip(gamma_v / sill, 0.0, 1.0)
-    cap_med = np.array(
-        [np.median(cap_raw[max(0, i - 1) : i + 2]) for i in range(len(cap_raw))]
-    )
-    cap = np.maximum.accumulate(cap_med)
+    half = max(1, len(gamma_v) // 2)
+    sill_robust = float(np.median(gamma_v[half:])) or (v["sill"] or 1.0)
+    cap_raw = np.clip(gamma_v / sill_robust, 0.0, 1.0)
+    smooth = np.convolve(cap_raw, np.ones(3) / 3.0, mode="same")
+    cap = np.maximum.accumulate(smooth)
+    cap_max = float(cap.max())  # plateau: max *reachable* correlation
 
-    budget_tb = BUDGET_TB
     table = []
     for r, c in zip(lags_v, cap):
         s = float(np.mean(off <= r))
@@ -364,14 +362,22 @@ def sparsity_accuracy_sweep(
     def _last(pred):
         return next((row for row in reversed(table) if pred(row)), None)
 
-    r_full = _first(lambda row: row["captured"] >= 0.95) or table[-1]
-    r_budget = _last(lambda row: row["storage_TB"] <= budget_tb)
+    # r_full = the KNEE: shortest radius that reaches the plateau (within 2% of
+    # cap_max). Using cap_max (not a hardcoded 0.95) means a variogram that
+    # saturates BELOW 1.0 -- i.e. has an unstructured floor no radius can reach --
+    # is handled correctly: extending support past the knee adds storage but no
+    # captured correlation.
+    knee = cap_max - 0.02
+    r_full = _first(lambda row: row["captured"] >= knee) or table[-1]
+    r_budget = _last(lambda row: row["storage_TB"] <= BUDGET_TB)
 
-    full_fits = r_full["storage_TB"] <= budget_tb
+    full_fits = r_full["storage_TB"] <= BUDGET_TB
     return {
         "target_N": int(target_N),
         "table": table,
-        "r_full": r_full,  # shortest full-correlation support
+        "reachable_correlation": cap_max,  # plateau height (structured frac)
+        "unstructured_floor": 1.0 - cap_max,  # variance no support radius reaches
+        "r_full": r_full,  # knee: shortest support capturing the plateau
         "r_budget": r_budget,  # most correlation affordable within budget
         "full_accuracy_fits_budget": bool(full_fits),
         "accuracy_traded": (
@@ -397,11 +403,20 @@ def format_sweep(sw: dict) -> str:
     rf, rb = sw["r_full"], sw["r_budget"]
     L.append("-" * 46)
     L.append(
-        f"  r_full  (captures ~all correlation): r={rf['radius']:.3g} "
+        f"  reachable correlation (plateau): {sw['reachable_correlation']:.2f}"
+        f"   unstructured floor: {sw['unstructured_floor']:.2f}"
+        f"  (variance no radius can reach)"
+    )
+    L.append(
+        f"  r_full  (knee; captures the plateau): r={rf['radius']:.3g} "
         f"s*={rf['s_star']:.3f} storage={rf['storage_TB']:.1f} TB"
     )
     if sw["full_accuracy_fits_budget"]:
-        L.append("  => EXACT full-accuracy GP FITS at target N. Proceed.")
+        L.append(
+            "  => storable: a support radius captures all REACHABLE "
+            "correlation within budget. (Reachable != predictive skill --"
+        )
+        L.append("     cross-check against kNN skill / retained variance.)")
     elif rb is not None:
         L.append(
             f"  r_budget(max affordable):            r={rb['radius']:.3g} "

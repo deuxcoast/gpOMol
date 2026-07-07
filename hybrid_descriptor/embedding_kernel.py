@@ -44,41 +44,68 @@ import numpy as np
 @dataclass
 class FeatureReducer:
     """
-    PCA via SVD. Fit on a subsample for scale; apply to everything.
+    Dimensionality reduction with two modes:
 
-    At OMol25 scale swap the exact SVD here for sklearn.decomposition.IncrementalPCA
-    (streams minibatches, bounded memory) or sklearn.utils.extmath.randomized_svd.
-    The transform is identical; only the fit differs.
+      method="pls" (SUPERVISED, default): partial least squares regresses the raw
+        features toward the residual and keeps the directions that co-vary with
+        it. This is the right choice here: the Stage-1 analysis showed the energy
+        signal lives in LOW-variance feature directions, which unsupervised PCA
+        ranks last and discards -- PLS reached held-out R^2 ~0.15 at 10 components
+        while PCA needed 50 to reach ~0.09. Packing the signal into fewer axes also
+        lowers the kernel dimension, which helps sparsity for gp2Scale.
+
+      method="pca" (UNSUPERVISED): kept for comparison / ablation.
+
+    Fit on a subsample; apply the frozen transform to everything (incl. the full
+    4M). For PCA at scale, swap the SVD for sklearn IncrementalPCA; PLS.fit here is
+    already fine at 10^5 and the fitted transform applies in one matmul.
     """
 
     n_components: int = 15
+    method: str = "pls"  # "pls" | "pca"
+    # PCA state
     mean_: np.ndarray = field(default=None, repr=False)
     components_: np.ndarray = field(default=None, repr=False)  # (D, D_raw)
     explained_variance_ratio_: np.ndarray = field(default=None, repr=False)
+    # PLS state
+    pls_: object = field(default=None, repr=False)
 
-    def fit(self, X: np.ndarray) -> "FeatureReducer":
+    def fit(self, X: np.ndarray, y: np.ndarray = None) -> "FeatureReducer":
         X = np.asarray(X, dtype=float)
-        self.mean_ = X.mean(axis=0)
-        Xc = X - self.mean_
-        # economy SVD; rows of Vt are principal axes
-        _, S, Vt = np.linalg.svd(Xc, full_matrices=False)
-        k = self.n_components
-        self.components_ = Vt[:k]
-        var = (S**2) / (len(X) - 1)
-        self.explained_variance_ratio_ = (var / var.sum())[:k]
+        if self.method == "pca":
+            self.mean_ = X.mean(axis=0)
+            Xc = X - self.mean_
+            _, S, Vt = np.linalg.svd(Xc, full_matrices=False)  # rows of Vt = axes
+            k = self.n_components
+            self.components_ = Vt[:k]
+            var = (S**2) / (len(X) - 1)
+            self.explained_variance_ratio_ = (var / var.sum())[:k]
+        elif self.method == "pls":
+            if y is None:
+                raise ValueError("PLS reduction requires y (the intensive residual).")
+            from sklearn.cross_decomposition import PLSRegression
+
+            # scale=False: features are already z-scored by the assembler.
+            self.pls_ = PLSRegression(n_components=self.n_components, scale=False)
+            self.pls_.fit(X, np.asarray(y, dtype=float).ravel())
+        else:
+            raise ValueError("method must be 'pls' or 'pca'")
         return self
 
     def transform(self, X: np.ndarray) -> np.ndarray:
-        Xc = np.asarray(X, dtype=float) - self.mean_
-        return Xc @ self.components_.T
+        X = np.asarray(X, dtype=float)
+        if self.method == "pca":
+            return (X - self.mean_) @ self.components_.T
+        return self.pls_.transform(X)
 
-    def fit_transform(self, X: np.ndarray) -> np.ndarray:
-        return self.fit(X).transform(X)
+    def fit_transform(self, X: np.ndarray, y: np.ndarray = None) -> np.ndarray:
+        return self.fit(X, y).transform(X)
 
     def retained_variance(self) -> float:
-        """Fraction of variance kept by the top-D components. If this is low
-        (<~0.8) AND the residual nugget is high, the reduction destroyed signal:
-        raise n_components (re-checking PSD) or revisit the channels."""
+        """PCA only: fraction of feature variance kept. Returns NaN for PLS, where
+        this quantity is not the relevant diagnostic (held-out R^2 is)."""
+        if self.method != "pca" or self.explained_variance_ratio_ is None:
+            return float("nan")
         return float(self.explained_variance_ratio_.sum())
 
 

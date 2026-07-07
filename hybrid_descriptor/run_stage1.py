@@ -38,18 +38,21 @@ def stage1(
     batch: "MolBatch",
     n_components: int = 15,
     wendland_k: int = 2,
+    reducer: str = "pls",
     n_diag: int = 4000,
     target_N: int = 4_000_000,
     seed: int = 0,
     out: str = None,
 ):
-    # ---- fit preprocessor on the FULL subsample (cheap: OLS + one SVD) --------
-    pre = HybridPreprocessor(n_components=n_components)
+    # ---- fit preprocessor on the FULL subsample (cheap: OLS + one reduction) --
+    pre = HybridPreprocessor(n_components=n_components, reducer_method=reducer)
     X, resid = pre.fit(batch)
+    rv = pre.reducer.retained_variance()
+    rv_str = f"{rv:.3f}" if rv == rv else "n/a (pls)"  # NaN check
     print(
-        f"[preprocess] N={len(X):,}  D={X.shape[1]}  "
-        f"retained_var={pre.reducer.retained_variance():.3f}  "
-        f"residual_var={np.var(resid):.4g}  mean_extra_cols={pre.mean_model.n_extra_}"
+        f"[preprocess] N={len(X):,}  D={X.shape[1]}  reducer={reducer}  "
+        f"retained_var={rv_str}  residual_var={np.var(resid):.4g}  "
+        f"mean_extra_cols={pre.mean_model.n_extra_}"
     )
 
     # ---- pairwise diagnostics on a sub-sample (O(n^2) memory guard) ----------
@@ -106,7 +109,13 @@ def main():
     ap.add_argument("--n_fit", type=int, default=100_000, help="subsample to fit on")
     ap.add_argument("--n_diag", type=int, default=4000, help="pairwise-diagnostic size")
     ap.add_argument(
-        "--n_components", type=int, default=15, help="PCA dim (<= Wendland d0)"
+        "--n_components", type=int, default=15, help="reduced dim (<= Wendland d0)"
+    )
+    ap.add_argument(
+        "--reducer",
+        default="pls",
+        choices=["pls", "pca"],
+        help="pls = supervised (recommended); pca = unsupervised (ablation)",
     )
     ap.add_argument("--wendland_k", type=int, default=2, help="Wendland smoothness")
     ap.add_argument("--target_N", type=int, default=4_000_000)
@@ -131,6 +140,7 @@ def main():
         batch,
         n_components=a.n_components,
         wendland_k=a.wendland_k,
+        reducer=a.reducer,
         n_diag=a.n_diag,
         target_N=a.target_N,
         seed=a.seed,

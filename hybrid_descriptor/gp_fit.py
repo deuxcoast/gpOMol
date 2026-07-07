@@ -71,10 +71,14 @@ class MolBatch:
 
 
 def charge_spin_features(Z_list, ctx) -> np.ndarray:
-    """Extensive-mean extra features: [net_charge, spin_multiplicity]. Low-order
-    on purpose — this is a prior mean, not a model of the physics."""
+    """Extensive-mean extra features. Element counts already encode size linearly;
+    the Stage-1 residual analysis found ~8.5% of residual still explained by
+    size/charge nonlinearity, so we add the nonlinear terms the linear count model
+    can't represent: |charge|, charge^2, and n_atoms^2 (plus signed charge, spin).
+    Still low-order -- this is a prior mean, not a model of the physics."""
     charge, spin = (0.0, 1.0) if ctx is None else (float(ctx[0]), float(ctx[1]))
-    return np.array([charge, spin], dtype=float)
+    n = float(len(Z_list))
+    return np.array([charge, abs(charge), charge**2, spin, n**2], dtype=float)
 
 
 # ----------------------------------------------------------------------------
@@ -184,6 +188,7 @@ class HybridPreprocessor:
     n_components: int = 15
     wl_depth: int = 3
     wl_buckets: int = 256
+    reducer_method: str = "pls"  # "pls" (supervised, default) | "pca"
 
     mean_model: ExtensiveEnergyModel = None
     assembler: HybridFeatureAssembler = None
@@ -205,7 +210,11 @@ class HybridPreprocessor:
             batch.graphs, batch.positions_list, batch.charges_list
         )
 
-        self.reducer = FeatureReducer(n_components=self.n_components).fit(X_raw)
+        # PLS is supervised: it fits toward the residual (leakage-safe -- fit on
+        # train only, then the frozen transform applies to test / the full 4M).
+        self.reducer = FeatureReducer(
+            n_components=self.n_components, method=self.reducer_method
+        ).fit(X_raw, residual)
         X = self.reducer.transform(X_raw)
         return X, residual
 
@@ -249,6 +258,7 @@ def gate_then_fit(
     target_N: int = 4_000_000,
     n_components: int = 15,
     wendland_k: int = 2,
+    reducer_method: str = "pls",
     dask_client=None,
     gp2Scale_batch_size: int = 10_000,
     run_gate: bool = True,
@@ -261,7 +271,7 @@ def gate_then_fit(
     residual; `pre` is the fitted HybridPreprocessor (needed to predict physical
     energies later); `report` is the FalsificationReport (None if run_gate=False).
     """
-    pre = HybridPreprocessor(n_components=n_components)
+    pre = HybridPreprocessor(n_components=n_components, reducer_method=reducer_method)
     X, residual = pre.fit(batch)
 
     # ---- Falsification gate (cheap; do it before spending cluster time) -------
