@@ -92,10 +92,13 @@ def fit_env_embedding(
     """
     mean_ = X_raw.mean(axis=0)
     scale_ = X_raw.std(axis=0) + 1e-12
-    Xs = (X_raw - mean_) / scale_
-    # economy SVD for PCA; robust for tall-thin (n >> F) SOAP matrices
-    U, S, Vt = np.linalg.svd(Xs, full_matrices=False)
+    Xs = ((X_raw - mean_) / scale_).astype(np.float32, copy=False)
+    # randomized SVD: O(n*F*D), low memory. A full np.linalg.svd on wide compressed-SOAP
+    # (F up to ~1e4) would allocate an n x F factor (~10 GB) and take minutes -- avoid it.
+    from sklearn.utils.extmath import randomized_svd
+
     n = Xs.shape[0]
+    U, S, Vt = randomized_svd(Xs, n_components=D, n_iter=5, random_state=0)
     ev = (S**2) / max(n - 1, 1)
     return EnvEmbedding(
         mean_=mean_,

@@ -23,6 +23,7 @@ is per-atom, and y = sum over all atoms in the record is the correct extensive t
 from __future__ import annotations
 
 import os
+import time
 
 import numpy as np
 
@@ -61,15 +62,18 @@ class OMol25Loader:
         embed_D=12,
         soap_kwargs=None,
         compression="mu1nu1",
-        n_ref_sample=50_000,
+        n_ref_sample=8000,
         n_embed_mols=2000,
         cache_dir=None,
         seed=0,
     ):
         from fairchem.core.datasets import AseDBDataset
 
+        t0 = time.time()
+        print(f"[loader] opening dataset {src} ...", flush=True)
         self.ds = AseDBDataset({"src": src})
         self.N = len(self.ds)
+        print(f"[loader] N={self.N:,} ({time.time()-t0:.1f}s)", flush=True)
         self.rng = np.random.default_rng(seed)
         self.perm = self.rng.permutation(self.N)  # fixed order -> nested prefixes
         self.embed_D = embed_D
@@ -77,11 +81,48 @@ class OMol25Loader:
         if cache_dir:
             os.makedirs(cache_dir, exist_ok=True)
 
-        # element set: use provided (from inspection: 80 elements) or scan a sample
-        self.species = species or self._scan_species(20_000)
+        # element set: PASS species=[...] (you have the 80-element list from inspection) to
+        # skip this scan entirely -- it reads n structures otherwise.
+        if species is None:
+            print(
+                f"[loader] scanning species from 20k structures "
+                f"(pass species=[...] to skip this) ...",
+                flush=True,
+            )
+            t = time.time()
+            self.species = self._scan_species(20_000)
+            print(
+                f"[loader] found {len(self.species)} elements ({time.time()-t:.1f}s)",
+                flush=True,
+            )
+        else:
+            self.species = sorted(species)
+            print(
+                f"[loader] using provided {len(self.species)} elements (scan skipped)",
+                flush=True,
+            )
+
+        t = time.time()
         self._build_soap(compression, soap_kwargs or {})
+        print(
+            f"[loader] SOAP compression={compression}  F={self.F:,} ({time.time()-t:.1f}s)",
+            flush=True,
+        )
+        t = time.time()
         self._fit_reference(n_ref_sample)
-        self._fit_embedding(n_embed_mols)  # PCA fit on a SOAP sample
+        print(
+            f"[loader] reference fit on {min(n_ref_sample,self.N):,} structures: "
+            f"residual std={self.resid_std:.3f} eV ({time.time()-t:.1f}s)",
+            flush=True,
+        )
+        t = time.time()
+        self._fit_embedding(n_embed_mols)
+        print(
+            f"[loader] embedding fit (D={embed_D}) on {n_embed_mols} molecules "
+            f"({time.time()-t:.1f}s)",
+            flush=True,
+        )
+        print(f"[loader] READY ({time.time()-t0:.1f}s total)", flush=True)
 
     # -------- species + SOAP object -------- #
     def _scan_species(self, n):
@@ -138,9 +179,10 @@ class OMol25Loader:
         from env_features_kernel import fit_env_embedding
 
         blocks = [
-            self.soap.create(self.ds.get_atoms(int(i))) for i in self.perm[:n_mols]
+            self.soap.create(self.ds.get_atoms(int(i))).astype(np.float32, copy=False)
+            for i in self.perm[:n_mols]
         ]
-        X_sample = np.vstack(blocks)  # (sample_atoms, F)
+        X_sample = np.vstack(blocks)  # (sample_atoms, F) float32
         self.embedding = fit_env_embedding(X_sample, D=self.embed_D)
 
     # -------- the population builder -------- #
@@ -159,14 +201,26 @@ class OMol25Loader:
 
         idx = self.perm[:n_mol]
         Z_blocks, mol_of, y, charges = [], [], np.empty(n_mol), []
+        t0 = time.time()
         for m, i in enumerate(idx):
             a = self.ds.get_atoms(int(i))
-            Z_blocks.append(self.embedding.transform(self.soap.create(a)))  # (k, D)
+            Z_blocks.append(
+                self.embedding.transform(
+                    self.soap.create(a).astype(np.float32, copy=False)
+                )
+            )  # (k, D)
             k = len(a)
             mol_of.extend([m] * k)
             y[m] = float(a.get_potential_energy()) - self._reference_energy(a)
             if keep_charges:
                 charges.append(a.info.get("lowdin_charges", np.zeros(k)))
+            if (m + 1) % 500 == 0:
+                rate = (m + 1) / (time.time() - t0)
+                print(
+                    f"[make_population] {m+1}/{n_mol} molecules "
+                    f"({rate:.0f}/s, eta {(n_mol-m-1)/rate:.0f}s)",
+                    flush=True,
+                )
         Z = np.vstack(Z_blocks)
         mol_of = np.asarray(mol_of)
         if tag:
