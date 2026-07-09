@@ -72,21 +72,27 @@ def empirical_arrays(V):
 # ----------------------------- filename ------------------------------------
 
 
-def _path(descriptor: str, mode: str, out_dir: str) -> str:
+def _path(descriptor: str, metric: str, mode: str, out_dir: str) -> str:
     os.makedirs(out_dir, exist_ok=True)
     ts = datetime.now().strftime("%m-%d-%H-%M-%S")
-    return os.path.join(out_dir, f"{descriptor}-{mode}-{ts}.png")
+    metric = "".join(ch if (ch.isalnum() or ch in "-_") else "_" for ch in metric)
+    return os.path.join(out_dir, f"{descriptor}-{metric}-{mode}-{ts}.png")
 
 
 # ----------------------------- renderers -----------------------------------
 
 
 def plot_empirical(
-    V, descriptor: str, out_dir: str = "variograms", subtitle: str = ""
+    V,
+    descriptor: str,
+    metric: str = "euclidean",
+    out_dir: str = "variograms",
+    subtitle: str = "",
 ) -> str:
-    """Experimental semivariogram curve; marker size & colour = per-bin pair count."""
+    """Experimental semivariogram curve; marker size & colour = per-bin pair count.
+    `metric` is used for the filename/title only -- the distances already live in V."""
     lag, gamma, counts = empirical_arrays(V)
-    path = _path(descriptor, "empirical", out_dir)
+    path = _path(descriptor, metric, "empirical", out_dir)
     cmax = counts.max() if counts.max() > 0 else 1.0
     sizes = 40.0 + 400.0 * (counts / cmax)
 
@@ -104,10 +110,10 @@ def plot_empirical(
             zorder=2,
         )
         fig.colorbar(sc, ax=ax, label="pairs per bin")
-        ax.set_xlabel("descriptor distance (lag)")
+        ax.set_xlabel(f"descriptor distance ({metric} lag)")
         ax.set_ylabel(r"semivariance  $\frac{1}{2}(y_i-y_j)^2$")
         ax.set_title(
-            f"Empirical semivariogram — {descriptor}"
+            f"Empirical semivariogram — {descriptor} [{metric}]"
             + (f"\n{subtitle}" if subtitle else "")
         )
         fig.tight_layout()
@@ -119,22 +125,23 @@ def plot_empirical(
 def plot_cloud(
     V,
     descriptor: str,
+    metric: str = "euclidean",
     out_dir: str = "variograms",
     subtitle: str = "",
     gridsize: int = 120,
 ) -> str:
     """Full pairwise hexbin density (log colour scale)."""
     distance, semivariance = cloud_arrays(V)
-    path = _path(descriptor, "cloud", out_dir)
+    path = _path(descriptor, metric, "cloud", out_dir)
     fig, ax = plt.subplots(figsize=(8, 6))
     hb = ax.hexbin(
         distance, semivariance, gridsize=gridsize, bins="log", mincnt=1, cmap="viridis"
     )
     fig.colorbar(hb, ax=ax, label="pair count (log)")
-    ax.set_xlabel("descriptor distance")
+    ax.set_xlabel(f"descriptor distance ({metric})")
     ax.set_ylabel(r"semivariance  $\frac{1}{2}(y_i-y_j)^2$   (residual energy)")
     ax.set_title(
-        f"Variogram cloud — {descriptor}   (n_pairs={len(distance):,})"
+        f"Variogram cloud — {descriptor} [{metric}]   (n_pairs={len(distance):,})"
         + (f"\n{subtitle}" if subtitle else "")
     )
     fig.tight_layout()
