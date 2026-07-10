@@ -2,8 +2,12 @@
 train_4M/
 *.png
 *.svg
-*.npy
-*.npz
+hybrid_descriptor/*.npy
+hybrid_descriptor/*.npz
+gp/*/*.npy
+gp/*/*.npz
+gp/*.npy
+gp/*.npz
 *.pkl
 gpomol/
 __pycache__
