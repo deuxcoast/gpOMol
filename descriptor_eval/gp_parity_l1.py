@@ -44,7 +44,7 @@ import matplotlib.pyplot as plt
 NORM = "euclidean"  # scipy metric: "euclidean" (L2) | "cityblock" (L1)
 NORM_LABEL = "L2"
 PLS_COMPONENTS = 10  # supervised reduction dimension
-CUTOFF = 10.0  # compact-support radius in PLS-embedding NORM space
+CUTOFF = 4.0  # compact-support radius in PLS-embedding NORM space
 SUBSET_N = 10_000
 TEST_FRACTION = 0.20
 RANDOM_STATE = 42  # deterministic split
@@ -153,6 +153,16 @@ def fit_and_predict(Z_tr, y_tr, Z_te, jitter, signal_var):
         kernel_function=wendland_kernel,
         noise_variances=jitter * np.ones(len(y_tr)),
     )
+
+    # --- UNFREEZE SIGNAL VARIANCE ---
+    # Provide search boundaries for hps[0]:
+    # e.g., from 1% of the empirical variance up to 1000%
+    bounds = np.array([[signal_var * 0.01, signal_var * 10.0]])
+
+    # This triggers the marginal log-likelihood optimization
+    gp.train(hyperparameter_bounds=bounds)
+    # --------------------------------
+
     mean = _first(gp.posterior_mean(Z_te), ["f(x)", "m(x)"])
     var = _first(
         gp.posterior_covariance(Z_te, variance_only=True), ["v(x)", "S(x)", "variance"]
