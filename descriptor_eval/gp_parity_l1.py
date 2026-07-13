@@ -72,6 +72,16 @@ CHANNEL_SLICES = {
 }
 RUN_LABEL = "all-PLS10-L2"  # recomputed in main()
 
+# --metric aliases -> scipy pdist name, and pretty labels for filename/title
+METRIC_ALIASES = {
+    "l1": "cityblock",
+    "manhattan": "cityblock",
+    "l2": "euclidean",
+    "euclid": "euclidean",
+    "linf": "chebyshev",
+}
+METRIC_LABELS = {"cityblock": "L1", "euclidean": "L2", "chebyshev": "Linf"}
+
 
 # ------------------------------ 1. data (raw features) ----------------------
 
@@ -177,28 +187,154 @@ def fit_with_jitter(Z_tr, y_tr, Z_te, signal_var):
     )
 
 
+def fit_single(Z_tr, y_tr, Z_te, jitter, signal_var):
+    """Single fixed-jitter fit -- NO escalation. Reports whether the Cholesky
+    actually succeeded at this jitter (so a degenerate fit can't pass silently)."""
+    frac = jitter / np.var(y_tr) * 100.0
+    print(
+        f"[jitter] single-shot fixed jitter = {jitter:g} eV^2 "
+        f"({frac:.1f}% of residual variance); no escalation"
+    )
+    try:
+        mean, var = fit_and_predict(Z_tr, y_tr, Z_te, jitter, signal_var)
+        print(f"[jitter] Cholesky SUCCEEDED at {jitter:g}")
+        return mean, var, jitter
+    except np.linalg.LinAlgError:
+        raise RuntimeError(
+            f"Cholesky FAILED at fixed jitter={jitter:g}: the kernel is not PD at "
+            "this level. Raise --jitter, or change --cutoff / --metric."
+        )
+
+
+# ------------------------------ nearest-neighbour diagnostic ----------------
+
+
+def nn_distances(Z_te, Z_tr):
+    """Distance from each TEST point to its NEAREST TRAIN point, in the SAME
+    embedding + metric the kernel uses. This is the quantity Marcus flagged: how
+    'covered' each test point is by training data."""
+    return cdist(Z_te, Z_tr, metric=NORM).min(axis=1)
+
+
+def error_vs_distance(nn_dist, y_te, y_pred, n_bins=10):
+    """Bin test points by nearest-train-neighbour distance (equal count) and print
+    RMSE per bin vs the mean-prediction baseline. The distance at which RMSE
+    climbs to ~baseline is the 'informative radius': inside it the GP is better
+    than guessing the mean; beyond it, it isn't. Returns (median_dist, rmse) per
+    bin for plotting."""
+    baseline = float(np.std(y_te))  # RMSE of predicting the test mean
+    edges = np.percentile(nn_dist, np.linspace(0, 100, n_bins + 1))
+    print("\n[nn-error] test error vs distance-to-nearest-train-neighbour")
+    print(
+        f"  baseline RMSE (predict the mean) = {baseline:.3f}   "
+        f"(overall RMSE = {np.sqrt(np.mean((y_pred - y_te) ** 2)):.3f})"
+    )
+    print(
+        f"  {'bin':>3}{'n':>6}{'med_nn_dist':>13}{'RMSE':>9}{'RMSE/base':>11}  informative?"
+    )
+    med, rms = [], []
+    informative_radius = None
+    left_zone = False  # once error reaches baseline, stop
+    for b in range(n_bins):
+        lo, hi = edges[b], edges[b + 1]
+        m = (
+            (nn_dist >= lo) & (nn_dist <= hi)
+            if b == n_bins - 1
+            else (nn_dist >= lo) & (nn_dist < hi)
+        )
+        if m.sum() == 0:
+            continue
+        rmse_b = float(np.sqrt(np.mean((y_pred[m] - y_te[m]) ** 2)))
+        md = float(np.median(nn_dist[m]))
+        ratio = rmse_b / baseline if baseline else np.nan
+        flag = "yes" if ratio < 0.9 else ("~" if ratio < 1.0 else "no (>=mean)")
+        # contiguous informative zone: extend while clearly below baseline; stop
+        # updating once a bin reaches baseline (later dips are small-bin noise)
+        if not left_zone:
+            if ratio < 0.9:
+                informative_radius = md
+            elif ratio >= 1.0:
+                left_zone = True
+        print(
+            f"  {b:>3}{int(m.sum()):>6}{md:>13.3f}{rmse_b:>9.3f}{ratio:>11.2f}  {flag}"
+        )
+        med.append(md)
+        rms.append(rmse_b)
+    if informative_radius is not None:
+        print(
+            f"  => informative out to nn-dist ~ {informative_radius:.3f} "
+            "(bins below baseline). More data helps IF it puts test points inside this."
+        )
+    else:
+        print(
+            "  => NO bin beats the mean baseline -> error is flat vs neighbour "
+            "distance; this looks REPRESENTATIONAL, not a density problem."
+        )
+    return np.array(med), np.array(rms), baseline
+
+
+def plot_error_vs_distance(med, rms, baseline):
+    os.makedirs(GRAPHS, exist_ok=True)
+    ts = datetime.now().strftime("%m-%d-%H-%M-%S")
+    path = os.path.join(GRAPHS, f"GP-nnerror-{RUN_LABEL}-{ts}.png")
+    with plt.style.context("fivethirtyeight"):
+        fig, ax = plt.subplots(figsize=(8, 6))
+        ax.plot(med, rms, "-o", lw=2, color="#348ABD", label="RMSE per distance bin")
+        ax.axhline(baseline, ls="--", color="k", lw=2, label="baseline (predict mean)")
+        ax.set_xlabel("distance to nearest train neighbour (bin median)")
+        ax.set_ylabel("test RMSE")
+        ax.set_title(
+            f"Informative radius — {RUN_LABEL}\n"
+            "RMSE below the dashed line = better than guessing the mean"
+        )
+        ax.legend(loc="lower right", fontsize=10)
+        fig.tight_layout()
+        fig.savefig(path, dpi=140)
+        plt.close(fig)
+    return path
+
+
 # ------------------------------ 4. parity plot ------------------------------
 
 
-def parity_plot(y_obs, y_pred, y_std, rmse, r2, jitter):
+def parity_plot(y_obs, y_pred, y_std, rmse, r2, jitter, nn_dist=None):
     os.makedirs(GRAPHS, exist_ok=True)
     ts = datetime.now().strftime("%m-%d-%H-%M-%S")
     path = os.path.join(GRAPHS, f"GP-parity-{RUN_LABEL}-{ts}.png")
     with plt.style.context("fivethirtyeight"):
-        fig, ax = plt.subplots(figsize=(8, 8))
+        fig, ax = plt.subplots(figsize=(8.6, 8))
+        # error bars drawn neutral/underneath so the point colour reads clearly
         ax.errorbar(
             y_obs,
             y_pred,
             yerr=SIGMA_MULT * y_std,
-            fmt="o",
-            ms=4,
-            alpha=0.45,
-            elinewidth=0.7,
-            capsize=0,
-            color="#348ABD",
-            ecolor="#B0B0B0",
-            label=rf"test predictions ($\pm{int(SIGMA_MULT)}\sigma$)",
+            fmt="none",
+            ecolor="#CFCFCF",
+            elinewidth=0.6,
+            zorder=1,
         )
+        if nn_dist is not None:
+            sc = ax.scatter(
+                y_obs,
+                y_pred,
+                c=nn_dist,
+                cmap="viridis",
+                s=20,
+                alpha=0.85,
+                zorder=2,
+                label=rf"test predictions ($\pm{int(SIGMA_MULT)}\sigma$)",
+            )
+            fig.colorbar(sc, ax=ax, label="distance to nearest train neighbour")
+        else:
+            ax.scatter(
+                y_obs,
+                y_pred,
+                s=20,
+                color="#348ABD",
+                alpha=0.6,
+                zorder=2,
+                label=rf"test predictions ($\pm{int(SIGMA_MULT)}\sigma$)",
+            )
         lo = float(min(y_obs.min(), y_pred.min()))
         hi = float(max(y_obs.max(), y_pred.max()))
         ax.plot([lo, hi], [lo, hi], "k--", lw=2, label="perfect (y = x)")
@@ -206,7 +342,7 @@ def parity_plot(y_obs, y_pred, y_std, rmse, r2, jitter):
         ax.set_ylabel("Predicted Residual Energy")
         ax.set_title(
             f"GP parity — {RUN_LABEL} (cutoff={CUTOFF:g})\n"
-            f"RMSE = {rmse:.4g}    $R^2$ = {r2:.3f}    jitter = {jitter:.0e}"
+            f"RMSE = {rmse:.4g}    $R^2$ = {r2:.3f}    jitter = {jitter:g}"
         )
         ax.legend(loc="upper left", fontsize=10)
         fig.tight_layout()
@@ -219,7 +355,7 @@ def parity_plot(y_obs, y_pred, y_std, rmse, r2, jitter):
 
 
 def main():
-    global CHANNEL, USE_PLS, PLS_COMPONENTS, CUTOFF, RUN_LABEL
+    global CHANNEL, USE_PLS, PLS_COMPONENTS, CUTOFF, RUN_LABEL, NORM, NORM_LABEL
     ap = argparse.ArgumentParser(
         description="per-channel PLS + Wendland GP parity test"
     )
@@ -238,6 +374,19 @@ def main():
         action="store_true",
         help="use standardized channel " "features directly, skipping PLS",
     )
+    ap.add_argument(
+        "--metric",
+        default="euclidean",
+        help="distance metric: l2/euclidean (default), l1/cityblock, "
+        "linf/chebyshev, or any scipy pdist metric name",
+    )
+    ap.add_argument(
+        "--jitter",
+        type=float,
+        default=None,
+        help="if set, fit ONCE at this exact diagonal noise (eV^2), "
+        "skipping the escalating retry loop",
+    )
     a = ap.parse_args()
     CHANNEL, USE_PLS, PLS_COMPONENTS, CUTOFF = (
         a.channel,
@@ -245,6 +394,9 @@ def main():
         a.pls_components,
         a.cutoff,
     )
+    NORM = METRIC_ALIASES.get(a.metric.lower(), a.metric.lower())
+    NORM_LABEL = METRIC_LABELS.get(NORM, a.metric.upper())
+    print(f"[metric] {a.metric} -> scipy '{NORM}' (label {NORM_LABEL})")
 
     X_raw, y = build_raw()
     Xc = X_raw[:, CHANNEL_SLICES[CHANNEL]]
@@ -283,13 +435,24 @@ def main():
     report_scale(Z_tr, Z_te)
 
     signal_var = float(np.var(y_tr))
-    mean, var, jitter = fit_with_jitter(Z_tr, y_tr, Z_te, signal_var)
+    if a.jitter is not None:
+        mean, var, jitter = fit_single(Z_tr, y_tr, Z_te, a.jitter, signal_var)
+    else:
+        mean, var, jitter = fit_with_jitter(Z_tr, y_tr, Z_te, signal_var)
     rmse = float(np.sqrt(np.mean((mean - y_te) ** 2)))
     r2 = float(r2_score(y_te, mean))
     print(
-        f"[result] {RUN_LABEL}  RMSE = {rmse:.4g}   R^2 = {r2:.3f}   (jitter {jitter:.0e})"
+        f"[result] {RUN_LABEL}  RMSE = {rmse:.4g}   R^2 = {r2:.3f}   (jitter {jitter:g})"
     )
-    print(f"[saved] {parity_plot(y_te, mean, np.sqrt(var), rmse, r2, jitter)}")
+
+    # nearest-neighbour coverage diagnostic (Marcus): is error a density effect?
+    nn = nn_distances(Z_te, Z_tr)
+    med, rms, base = error_vs_distance(nn, y_te, mean)
+    print(
+        f"[saved] {parity_plot(y_te, mean, np.sqrt(var), rmse, r2, jitter, nn_dist=nn)}"
+    )
+    if len(med) >= 2:
+        print(f"[saved] {plot_error_vs_distance(med, rms, base)}")
 
 
 if __name__ == "__main__":
