@@ -14,6 +14,7 @@ on the hybrid_descriptor package -- the eval framework is independent by design.
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -145,3 +146,116 @@ def standardize(X: np.ndarray):
     std = X.std(axis=0)
     std[std == 0] = 1.0
     return (X - mean) / std, mean, std
+
+
+# ============================================================================
+# WL-only, explicit-vocabulary featurizer (fitted on train)
+# ============================================================================
+# Replaces the collision-prone blake2b-mod-256 hashing with an EXACT per-depth
+# vocabulary learned from the training molecules. Geometry + charge channels are
+# dropped (WL-only); an additive kernel can reintroduce them later. Fit builds
+# the label->column maps from train; transform emits exact counts (OOV labels
+# dropped, rate reported). Depths are separate blocks; depth 0 (bare element
+# counts) is dropped by default since the extensive mean already removes
+# composition. mode="hashed" reproduces the old behaviour for A/B comparison.
+
+
+def wl_labels_per_depth(adjacency, node_labels, depth):
+    """Per-atom WL labels at each depth 0..depth. Depth 0 = element numbers;
+    depth d>=1 = 64-bit blake2b digest of (label | sorted neighbour labels),
+    which is the collision-free canonical id of that refined neighbourhood."""
+    n = len(node_labels)
+    labels = [str(l) for l in node_labels]
+    per_depth = [list(labels)]
+    for _ in range(depth):
+        expanded = [
+            labels[i] + "|" + ",".join(sorted(labels[j] for j in adjacency[i]))
+            for i in range(n)
+        ]
+        labels = [
+            hashlib.blake2b(e.encode(), digest_size=8).hexdigest() for e in expanded
+        ]
+        per_depth.append(list(labels))
+    return per_depth
+
+
+@dataclass
+class WLFeaturizer:
+    """Fitted WL descriptor. explicit: exact per-depth count vocabulary (default).
+    hashed: legacy 256-bucket hashing (for A/B). Counts normalised per atom
+    (intensive) by default. Depth 0 dropped unless include_depth0=True."""
+
+    depth: int = 3
+    include_depth0: bool = False
+    mode: str = "explicit"  # "explicit" | "hashed"
+    n_buckets: int = 256  # hashed mode only
+    normalize: bool = True
+    cutoff_mult: float = 1.2
+    vocab_: dict = field(default=None, repr=False)
+    depths_: list = field(default=None, repr=False)
+    last_oov_rate_: float = field(default=None, repr=False)
+
+    def __post_init__(self):
+        self.depths_ = list(range(0 if self.include_depth0 else 1, self.depth + 1))
+
+    def fit(self, atoms_list):
+        if self.mode == "hashed":
+            return self
+        vocab = {d: {} for d in self.depths_}
+        for atoms in atoms_list:
+            adj, lab = build_graph(atoms, self.cutoff_mult)
+            pdl = wl_labels_per_depth(adj, lab, self.depth)
+            for d in self.depths_:
+                v = vocab[d]
+                for L in set(pdl[d]):
+                    if L not in v:
+                        v[L] = len(v)
+        self.vocab_ = vocab
+        return self
+
+    @property
+    def n_features_(self):
+        if self.mode == "hashed":
+            return self.n_buckets
+        return sum(len(self.vocab_[d]) for d in self.depths_)
+
+    def transform(self, atoms_list):
+        N = len(atoms_list)
+        if self.mode == "hashed":
+            X = np.zeros((N, self.n_buckets))
+            for i, atoms in enumerate(atoms_list):
+                adj, lab = build_graph(atoms, self.cutoff_mult)
+                pdl = wl_labels_per_depth(adj, lab, self.depth)
+                for d in self.depths_:
+                    for L in pdl[d]:
+                        X[i, _bucket(f"{d}:{L}", self.n_buckets)] += 1.0
+                if self.normalize:
+                    X[i] /= max(len(lab), 1)
+            self.last_oov_rate_ = 0.0
+            return X
+
+        offsets, off = {}, 0
+        for d in self.depths_:
+            offsets[d] = off
+            off += len(self.vocab_[d])
+        X = np.zeros((N, off))
+        oov = tot = 0
+        for i, atoms in enumerate(atoms_list):
+            adj, lab = build_graph(atoms, self.cutoff_mult)
+            pdl = wl_labels_per_depth(adj, lab, self.depth)
+            for d in self.depths_:
+                v, base = self.vocab_[d], offsets[d]
+                for L in pdl[d]:
+                    tot += 1
+                    j = v.get(L)
+                    if j is None:
+                        oov += 1
+                        continue
+                    X[i, base + j] += 1.0
+            if self.normalize:
+                X[i] /= max(len(lab), 1)
+        self.last_oov_rate_ = oov / max(tot, 1)
+        return X
+
+    def fit_transform(self, atoms_list):
+        return self.fit(atoms_list).transform(atoms_list)

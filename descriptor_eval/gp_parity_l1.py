@@ -1,26 +1,26 @@
 #!/usr/bin/env python
 """
-gp_parity.py  (per-channel PLS + Wendland parity test)
-======================================================
-Validate a chosen descriptor CHANNEL with a compact-support Wendland GP on its
-(train-only) PLS embedding, and output a test-set parity plot.
+gp_parity.py  (WL-only, explicit-vocabulary PLS + Wendland parity test)
+======================================================================
+WL-ONLY descriptor (geometry + charge channels dropped -- reintroduce later via
+an additive kernel). The WL vector is built by an EXPLICIT per-depth vocabulary
+fitted on the training split (no hashing collisions), then standardized -> PLS
+-> compact-support Wendland GP. Output: test parity plot + nearest-neighbour
+coverage diagnostic.
 
-Channels (--channel): 'wl' (topology), 'geometry' (distance histogram),
-'charge' (Loewdin scalars), or 'all' (the full 323-dim hybrid).
+Key flags:
+  --wl-mode {explicit,hashed}   explicit = exact vocab (default); hashed = legacy
+                                256-bucket, for an A/B on the SAME split.
+  --wl-depth N                  WL refinement depth (default 3).
+  --include-depth0              keep depth-0 (bare element counts); dropped by
+                                default since the extensive mean removes composition.
+  --metric {l2,l1,...}          distance metric (default l2).
+  --pls-components / --no-pls   supervised reduction (fit on train only).
+  --cutoff / --cutoff-pct       compact-support radius (explicit, or auto by pctile).
+  --jitter X                    single fixed-jitter fit (skip the escalating loop).
 
-Motivation: on the full descriptor this pipeline gave R^2 ~ 0.08 at jitter 1e-6 --
-a representational ceiling, not a tuning problem (static vs trained signal variance
-were identical). The per-channel variograms said WL is the LOCAL + informative
-channel and geometry is the GLOBAL one, so the key test is WL ALONE through a
-compact-support kernel (the tool WL's locality actually suits).
-
-Leakage control: standardizer and PLS are fit on TRAIN only, applied to test.
-Cutoff calibration: distance scale changes per channel, so either set --cutoff
-explicitly or use --cutoff-pct P to put the cutoff at the P-th percentile of the
-embedding's train pairwise distances (the [scale] diagnostic reports where it lands).
-
-PD note: psi_{3,1} is PD on Euclidean R^d only for d<=3; the jitter loop covers
-the rest. Run from inside descriptor_eval/.
+Leakage control: WL vocabulary, standardizer, and PLS are all fit on TRAIN only.
+Run from inside descriptor_eval/.
 """
 
 import argparse
@@ -38,13 +38,15 @@ from sklearn.model_selection import train_test_split
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-# ============================ DEFAULT KNOBS (CLI overrides below) ============
-NORM = "euclidean"  # "euclidean" (L2) | "cityblock" (L1)
+# ============================ DEFAULT KNOBS (CLI overrides) ==================
+NORM = "euclidean"
 NORM_LABEL = "L2"
-CHANNEL = "all"  # wl | geometry | charge | all
+WL_MODE = "explicit"  # explicit | hashed
+WL_DEPTH = 3
+INCLUDE_DEPTH0 = False
 USE_PLS = True
 PLS_COMPONENTS = 10
-CUTOFF = 10.0  # compact-support radius (in embedding NORM space)
+CUTOFF = 10.0
 SUBSET_N = 10_000
 TEST_FRACTION = 0.20
 RANDOM_STATE = 42
@@ -59,20 +61,8 @@ import features
 SRC = os.path.join(SCRIPT_DIR, "..", "train_4M")
 CACHE = os.path.join(SCRIPT_DIR, "cache")
 GRAPHS = os.path.join(SCRIPT_DIR, "graphs")
+RUN_LABEL = "WL-explicit-PLS10-L2"
 
-# channel column layout of the 323-dim vector (WL=256, hist=64, charge=3)
-_WL = features.__dict__.get("N_WL", 256)
-_HIST = len(features.default_distance_bins()) - 1
-_CHG = 3
-CHANNEL_SLICES = {
-    "wl": slice(0, _WL),
-    "geometry": slice(_WL, _WL + _HIST),
-    "charge": slice(_WL + _HIST, _WL + _HIST + _CHG),
-    "all": slice(0, _WL + _HIST + _CHG),
-}
-RUN_LABEL = "all-PLS10-L2"  # recomputed in main()
-
-# --metric aliases -> scipy pdist name, and pretty labels for filename/title
 METRIC_ALIASES = {
     "l1": "cityblock",
     "manhattan": "cityblock",
@@ -83,22 +73,24 @@ METRIC_ALIASES = {
 METRIC_LABELS = {"cityblock": "L1", "euclidean": "L2", "chebyshev": "Linf"}
 
 
-# ------------------------------ 1. data (raw features) ----------------------
+# ------------------------------ 1. data (atoms + target) --------------------
 
 
-def build_raw():
+def build_atoms():
+    """Load frozen indices + residual target and the ase.Atoms (featurization is
+    fit-on-train, so it happens AFTER the split, not here)."""
     idx = np.load(os.path.join(CACHE, "subset_indices.npy"))
     y = np.load(os.path.join(CACHE, "y_residual.npy"))
     assert len(idx) == len(y), f"indices ({len(idx)}) vs y ({len(y)}) mismatch"
     if SUBSET_N < len(idx):
         idx, y = idx[:SUBSET_N], y[:SUBSET_N]
-    print(f"[data] {len(idx)} molecules; regenerating raw 323-dim features")
+    print(f"[data] loading {len(idx)} ase.Atoms")
     from fairchem.core.datasets import AseDBDataset
 
     ds = AseDBDataset({"src": SRC})
-    X_raw = np.vstack([features.featurize(ds.get_atoms(int(i))) for i in idx])
-    print(f"[data] X_raw {X_raw.shape}, y {y.shape} (residual var {np.var(y):.4g})")
-    return X_raw, y
+    atoms = [ds.get_atoms(int(i)) for i in idx]
+    print(f"[data] {len(atoms)} molecules, y (residual var {np.var(y):.4g})")
+    return atoms, y
 
 
 # ------------------------------ 2. Wendland kernel --------------------------
@@ -122,8 +114,7 @@ def report_scale(Z_tr, Z_te):
     )
     frac_in = (dtr < CUTOFF).mean()
     print(
-        f"[scale] CUTOFF={CUTOFF:g} sits at the {frac_in*100:.1f}th percentile "
-        "of train pair distances"
+        f"[scale] CUTOFF={CUTOFF:g} sits at the {frac_in*100:.1f}th percentile of train pairs"
     )
     nbr = (cdist(Z_te, Z_tr, metric=NORM) < CUTOFF).sum(axis=1)
     print(
@@ -132,14 +123,86 @@ def report_scale(Z_tr, Z_te):
     )
     if np.mean(nbr == 0) > 0.05:
         print(
-            "[scale] WARNING: many test points have zero in-support neighbours "
-            "-> mean-reversion; RAISE cutoff."
+            "[scale] WARNING: many zero-neighbour test points -> mean-reversion; RAISE cutoff."
         )
     elif frac_in > 0.98:
-        print(
-            "[scale] WARNING: cutoff exceeds ~all pair distances -> near-dense / "
-            "near-rank-1 kernel, may be ill-conditioned; LOWER cutoff."
+        print("[scale] WARNING: near-dense / near-rank-1 kernel; LOWER cutoff.")
+
+
+# ------------------------------ nearest-neighbour diagnostic ----------------
+
+
+def nn_distances(Z_te, Z_tr):
+    return cdist(Z_te, Z_tr, metric=NORM).min(axis=1)
+
+
+def error_vs_distance(nn_dist, y_te, y_pred, n_bins=10):
+    baseline = float(np.std(y_te))
+    edges = np.percentile(nn_dist, np.linspace(0, 100, n_bins + 1))
+    print("\n[nn-error] test error vs distance-to-nearest-train-neighbour")
+    print(
+        f"  baseline RMSE (predict the mean) = {baseline:.3f}   "
+        f"(overall RMSE = {np.sqrt(np.mean((y_pred - y_te)**2)):.3f})"
+    )
+    print(
+        f"  {'bin':>3}{'n':>6}{'med_nn_dist':>13}{'RMSE':>9}{'RMSE/base':>11}  informative?"
+    )
+    med, rms, informative_radius, left_zone = [], [], None, False
+    for b in range(n_bins):
+        lo, hi = edges[b], edges[b + 1]
+        m = (
+            (nn_dist >= lo) & (nn_dist <= hi)
+            if b == n_bins - 1
+            else (nn_dist >= lo) & (nn_dist < hi)
         )
+        if m.sum() == 0:
+            continue
+        rmse_b = float(np.sqrt(np.mean((y_pred[m] - y_te[m]) ** 2)))
+        md = float(np.median(nn_dist[m]))
+        ratio = rmse_b / baseline if baseline else np.nan
+        flag = "yes" if ratio < 0.9 else ("~" if ratio < 1.0 else "no (>=mean)")
+        if not left_zone:
+            if ratio < 0.9:
+                informative_radius = md
+            elif ratio >= 1.0:
+                left_zone = True
+        print(
+            f"  {b:>3}{int(m.sum()):>6}{md:>13.3f}{rmse_b:>9.3f}{ratio:>11.2f}  {flag}"
+        )
+        med.append(md)
+        rms.append(rmse_b)
+    if informative_radius is not None:
+        print(
+            f"  => informative out to nn-dist ~ {informative_radius:.3f}. More data helps "
+            "IF it puts test points inside this."
+        )
+    else:
+        print(
+            "  => NO bin beats the mean baseline -> error flat vs neighbour distance; "
+            "looks REPRESENTATIONAL, not a density problem."
+        )
+    return np.array(med), np.array(rms), baseline
+
+
+def plot_error_vs_distance(med, rms, baseline):
+    os.makedirs(GRAPHS, exist_ok=True)
+    ts = datetime.now().strftime("%m-%d-%H-%M-%S")
+    path = os.path.join(GRAPHS, f"GP-nnerror-{RUN_LABEL}-{ts}.png")
+    with plt.style.context("fivethirtyeight"):
+        fig, ax = plt.subplots(figsize=(8, 6))
+        ax.plot(med, rms, "-o", lw=2, color="#348ABD", label="RMSE per distance bin")
+        ax.axhline(baseline, ls="--", color="k", lw=2, label="baseline (predict mean)")
+        ax.set_xlabel("distance to nearest train neighbour (bin median)")
+        ax.set_ylabel("test RMSE")
+        ax.set_title(
+            f"Informative radius — {RUN_LABEL}\n"
+            "RMSE below the dashed line = better than guessing the mean"
+        )
+        ax.legend(loc="lower right", fontsize=10)
+        fig.tight_layout()
+        fig.savefig(path, dpi=140)
+        plt.close(fig)
+    return path
 
 
 # ------------------------------ posterior helpers ---------------------------
@@ -169,7 +232,7 @@ def fit_and_predict(Z_tr, y_tr, Z_te, jitter, signal_var):
     return mean, np.maximum(var, 0.0)
 
 
-# ------------------------------ 3. jitter retry loop ------------------------
+# ------------------------------ 3. jitter handling --------------------------
 
 
 def fit_with_jitter(Z_tr, y_tr, Z_te, signal_var):
@@ -188,8 +251,6 @@ def fit_with_jitter(Z_tr, y_tr, Z_te, signal_var):
 
 
 def fit_single(Z_tr, y_tr, Z_te, jitter, signal_var):
-    """Single fixed-jitter fit -- NO escalation. Reports whether the Cholesky
-    actually succeeded at this jitter (so a degenerate fit can't pass silently)."""
     frac = jitter / np.var(y_tr) * 100.0
     print(
         f"[jitter] single-shot fixed jitter = {jitter:g} eV^2 "
@@ -201,97 +262,9 @@ def fit_single(Z_tr, y_tr, Z_te, jitter, signal_var):
         return mean, var, jitter
     except np.linalg.LinAlgError:
         raise RuntimeError(
-            f"Cholesky FAILED at fixed jitter={jitter:g}: the kernel is not PD at "
-            "this level. Raise --jitter, or change --cutoff / --metric."
+            f"Cholesky FAILED at fixed jitter={jitter:g}: not PD. "
+            "Raise --jitter or change --cutoff / --metric."
         )
-
-
-# ------------------------------ nearest-neighbour diagnostic ----------------
-
-
-def nn_distances(Z_te, Z_tr):
-    """Distance from each TEST point to its NEAREST TRAIN point, in the SAME
-    embedding + metric the kernel uses. This is the quantity Marcus flagged: how
-    'covered' each test point is by training data."""
-    return cdist(Z_te, Z_tr, metric=NORM).min(axis=1)
-
-
-def error_vs_distance(nn_dist, y_te, y_pred, n_bins=10):
-    """Bin test points by nearest-train-neighbour distance (equal count) and print
-    RMSE per bin vs the mean-prediction baseline. The distance at which RMSE
-    climbs to ~baseline is the 'informative radius': inside it the GP is better
-    than guessing the mean; beyond it, it isn't. Returns (median_dist, rmse) per
-    bin for plotting."""
-    baseline = float(np.std(y_te))  # RMSE of predicting the test mean
-    edges = np.percentile(nn_dist, np.linspace(0, 100, n_bins + 1))
-    print("\n[nn-error] test error vs distance-to-nearest-train-neighbour")
-    print(
-        f"  baseline RMSE (predict the mean) = {baseline:.3f}   "
-        f"(overall RMSE = {np.sqrt(np.mean((y_pred - y_te) ** 2)):.3f})"
-    )
-    print(
-        f"  {'bin':>3}{'n':>6}{'med_nn_dist':>13}{'RMSE':>9}{'RMSE/base':>11}  informative?"
-    )
-    med, rms = [], []
-    informative_radius = None
-    left_zone = False  # once error reaches baseline, stop
-    for b in range(n_bins):
-        lo, hi = edges[b], edges[b + 1]
-        m = (
-            (nn_dist >= lo) & (nn_dist <= hi)
-            if b == n_bins - 1
-            else (nn_dist >= lo) & (nn_dist < hi)
-        )
-        if m.sum() == 0:
-            continue
-        rmse_b = float(np.sqrt(np.mean((y_pred[m] - y_te[m]) ** 2)))
-        md = float(np.median(nn_dist[m]))
-        ratio = rmse_b / baseline if baseline else np.nan
-        flag = "yes" if ratio < 0.9 else ("~" if ratio < 1.0 else "no (>=mean)")
-        # contiguous informative zone: extend while clearly below baseline; stop
-        # updating once a bin reaches baseline (later dips are small-bin noise)
-        if not left_zone:
-            if ratio < 0.9:
-                informative_radius = md
-            elif ratio >= 1.0:
-                left_zone = True
-        print(
-            f"  {b:>3}{int(m.sum()):>6}{md:>13.3f}{rmse_b:>9.3f}{ratio:>11.2f}  {flag}"
-        )
-        med.append(md)
-        rms.append(rmse_b)
-    if informative_radius is not None:
-        print(
-            f"  => informative out to nn-dist ~ {informative_radius:.3f} "
-            "(bins below baseline). More data helps IF it puts test points inside this."
-        )
-    else:
-        print(
-            "  => NO bin beats the mean baseline -> error is flat vs neighbour "
-            "distance; this looks REPRESENTATIONAL, not a density problem."
-        )
-    return np.array(med), np.array(rms), baseline
-
-
-def plot_error_vs_distance(med, rms, baseline):
-    os.makedirs(GRAPHS, exist_ok=True)
-    ts = datetime.now().strftime("%m-%d-%H-%M-%S")
-    path = os.path.join(GRAPHS, f"GP-nnerror-{RUN_LABEL}-{ts}.png")
-    with plt.style.context("fivethirtyeight"):
-        fig, ax = plt.subplots(figsize=(8, 6))
-        ax.plot(med, rms, "-o", lw=2, color="#348ABD", label="RMSE per distance bin")
-        ax.axhline(baseline, ls="--", color="k", lw=2, label="baseline (predict mean)")
-        ax.set_xlabel("distance to nearest train neighbour (bin median)")
-        ax.set_ylabel("test RMSE")
-        ax.set_title(
-            f"Informative radius — {RUN_LABEL}\n"
-            "RMSE below the dashed line = better than guessing the mean"
-        )
-        ax.legend(loc="lower right", fontsize=10)
-        fig.tight_layout()
-        fig.savefig(path, dpi=140)
-        plt.close(fig)
-    return path
 
 
 # ------------------------------ 4. parity plot ------------------------------
@@ -303,7 +276,6 @@ def parity_plot(y_obs, y_pred, y_std, rmse, r2, jitter, nn_dist=None):
     path = os.path.join(GRAPHS, f"GP-parity-{RUN_LABEL}-{ts}.png")
     with plt.style.context("fivethirtyeight"):
         fig, ax = plt.subplots(figsize=(8.6, 8))
-        # error bars drawn neutral/underneath so the point colour reads clearly
         ax.errorbar(
             y_obs,
             y_pred,
@@ -355,66 +327,62 @@ def parity_plot(y_obs, y_pred, y_std, rmse, r2, jitter, nn_dist=None):
 
 
 def main():
-    global CHANNEL, USE_PLS, PLS_COMPONENTS, CUTOFF, RUN_LABEL, NORM, NORM_LABEL
+    global WL_MODE, WL_DEPTH, INCLUDE_DEPTH0, USE_PLS, PLS_COMPONENTS, CUTOFF
+    global RUN_LABEL, NORM, NORM_LABEL
     ap = argparse.ArgumentParser(
-        description="per-channel PLS + Wendland GP parity test"
+        description="WL-only explicit-vocab PLS + Wendland parity test"
     )
-    ap.add_argument("--channel", default=CHANNEL, choices=list(CHANNEL_SLICES))
+    ap.add_argument("--wl-mode", default=WL_MODE, choices=["explicit", "hashed"])
+    ap.add_argument("--wl-depth", type=int, default=WL_DEPTH)
+    ap.add_argument("--include-depth0", action="store_true")
+    ap.add_argument("--metric", default="euclidean")
     ap.add_argument("--cutoff", type=float, default=CUTOFF)
     ap.add_argument(
         "--cutoff-pct",
         type=float,
         default=None,
-        help="if set, cutoff = this percentile of embedding train distances "
-        "(auto-calibrate; e.g. 80). Overrides --cutoff.",
+        help="cutoff = this percentile of embedding train distances (overrides --cutoff)",
     )
     ap.add_argument("--pls-components", type=int, default=PLS_COMPONENTS)
-    ap.add_argument(
-        "--no-pls",
-        action="store_true",
-        help="use standardized channel " "features directly, skipping PLS",
-    )
-    ap.add_argument(
-        "--metric",
-        default="euclidean",
-        help="distance metric: l2/euclidean (default), l1/cityblock, "
-        "linf/chebyshev, or any scipy pdist metric name",
-    )
+    ap.add_argument("--no-pls", action="store_true")
     ap.add_argument(
         "--jitter",
         type=float,
         default=None,
-        help="if set, fit ONCE at this exact diagonal noise (eV^2), "
-        "skipping the escalating retry loop",
+        help="single fixed diagonal noise (eV^2), skip the escalating loop",
     )
     a = ap.parse_args()
-    CHANNEL, USE_PLS, PLS_COMPONENTS, CUTOFF = (
-        a.channel,
-        not a.no_pls,
-        a.pls_components,
-        a.cutoff,
-    )
+    WL_MODE, WL_DEPTH, INCLUDE_DEPTH0 = a.wl_mode, a.wl_depth, a.include_depth0
+    USE_PLS, PLS_COMPONENTS, CUTOFF = not a.no_pls, a.pls_components, a.cutoff
     NORM = METRIC_ALIASES.get(a.metric.lower(), a.metric.lower())
     NORM_LABEL = METRIC_LABELS.get(NORM, a.metric.upper())
     print(f"[metric] {a.metric} -> scipy '{NORM}' (label {NORM_LABEL})")
 
-    X_raw, y = build_raw()
-    Xc = X_raw[:, CHANNEL_SLICES[CHANNEL]]
-    print(f"[channel] '{CHANNEL}' -> {Xc.shape[1]} raw dims")
-
-    Xc_tr, Xc_te, y_tr, y_te = train_test_split(
-        Xc, y, test_size=TEST_FRACTION, random_state=RANDOM_STATE
+    atoms, y = build_atoms()
+    a_tr, a_te, y_tr, y_te = train_test_split(
+        atoms, y, test_size=TEST_FRACTION, random_state=RANDOM_STATE
     )
     print(f"[split] train {len(y_tr)}  test {len(y_te)}  (random_state={RANDOM_STATE})")
 
-    Xs_tr, mean_, std_ = features.standardize(Xc_tr)
-    Xs_te = (Xc_te - mean_) / std_
+    # WL featurizer: fit vocabulary on TRAIN only, transform both
+    feat = features.WLFeaturizer(
+        depth=WL_DEPTH, include_depth0=INCLUDE_DEPTH0, mode=WL_MODE
+    )
+    Xr_tr = feat.fit_transform(a_tr)
+    Xr_te = feat.transform(a_te)
+    print(
+        f"[wl] mode={WL_MODE} depths={feat.depths_} D={feat.n_features_}  "
+        f"test OOV rate={feat.last_oov_rate_:.1%}"
+    )
+
+    Xs_tr, mean_, std_ = features.standardize(Xr_tr)
+    Xs_te = (Xr_te - mean_) / std_
 
     if USE_PLS:
-        ncomp = min(PLS_COMPONENTS, Xc.shape[1])  # clamp for narrow channels
+        ncomp = min(PLS_COMPONENTS, Xr_tr.shape[1])
         if ncomp < PLS_COMPONENTS:
             print(
-                f"[pls] clamping components {PLS_COMPONENTS} -> {ncomp} (channel width)"
+                f"[pls] clamping components {PLS_COMPONENTS} -> {ncomp} (feature width)"
             )
         pls = PLSRegression(n_components=ncomp, scale=False).fit(Xs_tr, y_tr)
         Z_tr, Z_te = pls.transform(Xs_tr), pls.transform(Xs_te)
@@ -423,15 +391,15 @@ def main():
     else:
         Z_tr, Z_te = Xs_tr, Xs_te
         embed = "raw"
-        print(f"[embed] using standardized channel features directly {Z_tr.shape}")
+        print(f"[embed] standardized WL features directly {Z_tr.shape}")
 
-    if a.cutoff_pct is not None:  # auto-calibrate the cutoff
+    if a.cutoff_pct is not None:
         CUTOFF = float(np.percentile(pdist(Z_tr, metric=NORM), a.cutoff_pct))
         print(
             f"[cutoff] set to {a.cutoff_pct:g}th pct of embedding distances = {CUTOFF:.4g}"
         )
 
-    RUN_LABEL = f"{CHANNEL}-{embed}-{NORM_LABEL}"
+    RUN_LABEL = f"WL-{WL_MODE}-{embed}-{NORM_LABEL}"
     report_scale(Z_tr, Z_te)
 
     signal_var = float(np.var(y_tr))
@@ -439,13 +407,13 @@ def main():
         mean, var, jitter = fit_single(Z_tr, y_tr, Z_te, a.jitter, signal_var)
     else:
         mean, var, jitter = fit_with_jitter(Z_tr, y_tr, Z_te, signal_var)
+
     rmse = float(np.sqrt(np.mean((mean - y_te) ** 2)))
     r2 = float(r2_score(y_te, mean))
     print(
         f"[result] {RUN_LABEL}  RMSE = {rmse:.4g}   R^2 = {r2:.3f}   (jitter {jitter:g})"
     )
 
-    # nearest-neighbour coverage diagnostic (Marcus): is error a density effect?
     nn = nn_distances(Z_te, Z_tr)
     med, rms, base = error_vs_distance(nn, y_te, mean)
     print(
