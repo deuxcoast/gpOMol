@@ -1,31 +1,29 @@
 #!/usr/bin/env python
 """
-gp_parity.py  (PLS + L2 Wendland variant)
-=========================================
-Validate the WL descriptor with a compact-support Wendland GP on the SUPERVISED
-PLS embedding (not the raw 323-dim vector), and output a test-set parity plot.
+gp_parity.py  (per-channel PLS + Wendland parity test)
+======================================================
+Validate a chosen descriptor CHANNEL with a compact-support Wendland GP on its
+(train-only) PLS embedding, and output a test-set parity plot.
 
-Why PLS here: on the raw 323-dim descriptor the L2 Wendland was PSD at jitter=1e-6
-but gave R^2 ~ 0.02 -- a SPARSITY failure, because a cutoff of ~10 is far below the
-~25 median pairwise L2 distance in 323-standardized space, so test points had no
-in-support neighbours. PLS compresses the signal into ~10 dimensions where typical
-distances are much smaller, so a cutoff near the PLS variogram range should give a
-well-populated (non-degenerate) kernel.
+Channels (--channel): 'wl' (topology), 'geometry' (distance histogram),
+'charge' (Loewdin scalars), or 'all' (the full 323-dim hybrid).
 
-Leakage control: PLS is supervised, so the standardizer AND the PLS model are fit
-on the TRAIN split only and then applied to test. Fitting PLS on all data would
-leak test labels into the embedding and inflate R^2.
+Motivation: on the full descriptor this pipeline gave R^2 ~ 0.08 at jitter 1e-6 --
+a representational ceiling, not a tuning problem (static vs trained signal variance
+were identical). The per-channel variograms said WL is the LOCAL + informative
+channel and geometry is the GLOBAL one, so the key test is WL ALONE through a
+compact-support kernel (the tool WL's locality actually suits).
 
-PD note: the Wendland psi_{3,1} is PD on Euclidean R^d only for d <= 3, so even at
-d=PLS_COMPONENTS it is not guaranteed PD; the jitter loop handles the rest. If
-jitter climbs, switch to the dimension-correct psi_{d,k} (available on request).
+Leakage control: standardizer and PLS are fit on TRAIN only, applied to test.
+Cutoff calibration: distance scale changes per channel, so either set --cutoff
+explicitly or use --cutoff-pct P to put the cutoff at the P-th percentile of the
+embedding's train pairwise distances (the [scale] diagnostic reports where it lands).
 
-A scale diagnostic prints BEFORE the GP so you can calibrate the cutoff from the
-actual PLS-space distances rather than guessing.
-
-Run from inside descriptor_eval/ (like run_eval.py); paths are anchored to this file.
+PD note: psi_{3,1} is PD on Euclidean R^d only for d<=3; the jitter loop covers
+the rest. Run from inside descriptor_eval/.
 """
 
+import argparse
 import os
 import sys
 from datetime import datetime
@@ -40,16 +38,18 @@ from sklearn.model_selection import train_test_split
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-# ============================ EASILY MODIFIABLE KNOBS ========================
-NORM = "euclidean"  # scipy metric: "euclidean" (L2) | "cityblock" (L1)
+# ============================ DEFAULT KNOBS (CLI overrides below) ============
+NORM = "euclidean"  # "euclidean" (L2) | "cityblock" (L1)
 NORM_LABEL = "L2"
-PLS_COMPONENTS = 10  # supervised reduction dimension
-CUTOFF = 4.0  # compact-support radius in PLS-embedding NORM space
+CHANNEL = "all"  # wl | geometry | charge | all
+USE_PLS = True
+PLS_COMPONENTS = 10
+CUTOFF = 10.0  # compact-support radius (in embedding NORM space)
 SUBSET_N = 10_000
 TEST_FRACTION = 0.20
-RANDOM_STATE = 42  # deterministic split
-SIGMA_MULT = 2.0  # error bars = +/- 2 sigma
-JITTER_EXPONENTS = range(-6, 0)  # 1e-6 ... 1e-1
+RANDOM_STATE = 42
+SIGMA_MULT = 2.0
+JITTER_EXPONENTS = range(-6, 0)
 # ============================================================================
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -59,22 +59,30 @@ import features
 SRC = os.path.join(SCRIPT_DIR, "..", "train_4M")
 CACHE = os.path.join(SCRIPT_DIR, "cache")
 GRAPHS = os.path.join(SCRIPT_DIR, "graphs")
-RUN_LABEL = f"PLS{PLS_COMPONENTS}-{NORM_LABEL}"
+
+# channel column layout of the 323-dim vector (WL=256, hist=64, charge=3)
+_WL = features.__dict__.get("N_WL", 256)
+_HIST = len(features.default_distance_bins()) - 1
+_CHG = 3
+CHANNEL_SLICES = {
+    "wl": slice(0, _WL),
+    "geometry": slice(_WL, _WL + _HIST),
+    "charge": slice(_WL + _HIST, _WL + _HIST + _CHG),
+    "all": slice(0, _WL + _HIST + _CHG),
+}
+RUN_LABEL = "all-PLS10-L2"  # recomputed in main()
 
 
 # ------------------------------ 1. data (raw features) ----------------------
 
 
 def build_raw():
-    """Load frozen indices + residual target; regenerate the RAW 323-dim feature
-    matrix (standardization + PLS happen AFTER the split, train-only)."""
     idx = np.load(os.path.join(CACHE, "subset_indices.npy"))
     y = np.load(os.path.join(CACHE, "y_residual.npy"))
     assert len(idx) == len(y), f"indices ({len(idx)}) vs y ({len(y)}) mismatch"
     if SUBSET_N < len(idx):
         idx, y = idx[:SUBSET_N], y[:SUBSET_N]
     print(f"[data] {len(idx)} molecules; regenerating raw 323-dim features")
-
     from fairchem.core.datasets import AseDBDataset
 
     ds = AseDBDataset({"src": SRC})
@@ -87,8 +95,6 @@ def build_raw():
 
 
 def wendland_kernel(x1, x2, hps):
-    """Compact-support C2 Wendland psi(r)=(1-r)^4 (4r+1) over the NORM distance,
-    scaled by hps[0]. psi = 0 for distance >= CUTOFF."""
     signal_var = hps[0]
     D = cdist(x1, x2, metric=NORM)
     r = np.clip(D / CUTOFF, 0.0, 1.0)
@@ -99,48 +105,41 @@ def wendland_kernel(x1, x2, hps):
 
 
 def report_scale(Z_tr, Z_te):
-    """Print PLS-space distance percentiles and in-support neighbour counts so the
-    cutoff can be calibrated (this is the check that would have caught the raw-L2
-    sparsity failure before it happened)."""
     dtr = pdist(Z_tr, metric=NORM)
     pct = np.percentile(dtr, [5, 25, 50, 75, 95])
     print(
-        f"[scale] train pairwise {NORM} dist pctiles "
-        f"[5,25,50,75,95] = {np.round(pct, 3)}"
+        f"[scale] train pairwise {NORM} dist pctiles [5,25,50,75,95] = {np.round(pct,3)}"
     )
+    frac_in = (dtr < CUTOFF).mean()
     print(
-        f"[scale] CUTOFF={CUTOFF:g} sits at the "
-        f"{(dtr < CUTOFF).mean() * 100:.1f}th percentile of train pair distances"
+        f"[scale] CUTOFF={CUTOFF:g} sits at the {frac_in*100:.1f}th percentile "
+        "of train pair distances"
     )
     nbr = (cdist(Z_te, Z_tr, metric=NORM) < CUTOFF).sum(axis=1)
     print(
-        f"[scale] in-support train neighbours per TEST point: "
-        f"median={np.median(nbr):.0f} min={int(nbr.min())} "
-        f"frac_with_zero={np.mean(nbr == 0):.1%}"
+        f"[scale] in-support train neighbours per TEST point: median={np.median(nbr):.0f} "
+        f"min={int(nbr.min())} frac_with_zero={np.mean(nbr==0):.1%}"
     )
-    frac_in = (dtr < CUTOFF).mean()
     if np.mean(nbr == 0) > 0.05:
         print(
             "[scale] WARNING: many test points have zero in-support neighbours "
-            "-> expect mean-reversion; RAISE CUTOFF."
+            "-> mean-reversion; RAISE cutoff."
         )
     elif frac_in > 0.98:
         print(
-            "[scale] WARNING: cutoff exceeds ~all pair distances -> kernel is "
-            "near-dense/near-rank-1 and may be ill-conditioned (jitter may climb "
-            "or predictions smooth to the mean); consider LOWERING CUTOFF toward "
-            "the variogram range."
+            "[scale] WARNING: cutoff exceeds ~all pair distances -> near-dense / "
+            "near-rank-1 kernel, may be ill-conditioned; LOWER cutoff."
         )
 
 
 # ------------------------------ posterior helpers ---------------------------
 
 
-def _first(result_dict, keys):
+def _first(d, keys):
     for k in keys:
-        if k in result_dict:
-            return np.asarray(result_dict[k]).ravel()
-    raise KeyError(f"none of {keys} in gpCAM keys {list(result_dict)}")
+        if k in d:
+            return np.asarray(d[k]).ravel()
+    raise KeyError(f"none of {keys} in gpCAM keys {list(d)}")
 
 
 def fit_and_predict(Z_tr, y_tr, Z_te, jitter, signal_var):
@@ -153,16 +152,6 @@ def fit_and_predict(Z_tr, y_tr, Z_te, jitter, signal_var):
         kernel_function=wendland_kernel,
         noise_variances=jitter * np.ones(len(y_tr)),
     )
-
-    # --- UNFREEZE SIGNAL VARIANCE ---
-    # Provide search boundaries for hps[0]:
-    # e.g., from 1% of the empirical variance up to 1000%
-    bounds = np.array([[signal_var * 0.01, signal_var * 10.0]])
-
-    # This triggers the marginal log-likelihood optimization
-    gp.train(hyperparameter_bounds=bounds)
-    # --------------------------------
-
     mean = _first(gp.posterior_mean(Z_te), ["f(x)", "m(x)"])
     var = _first(
         gp.posterior_covariance(Z_te, variance_only=True), ["v(x)", "S(x)", "variance"]
@@ -216,8 +205,7 @@ def parity_plot(y_obs, y_pred, y_std, rmse, r2, jitter):
         ax.set_xlabel("Observed Residual Energy")
         ax.set_ylabel("Predicted Residual Energy")
         ax.set_title(
-            f"GP parity — PLS({PLS_COMPONENTS}) + {NORM_LABEL} Wendland "
-            f"(cutoff={CUTOFF:g})\n"
+            f"GP parity — {RUN_LABEL} (cutoff={CUTOFF:g})\n"
             f"RMSE = {rmse:.4g}    $R^2$ = {r2:.3f}    jitter = {jitter:.0e}"
         )
         ax.legend(loc="upper left", fontsize=10)
@@ -231,29 +219,76 @@ def parity_plot(y_obs, y_pred, y_std, rmse, r2, jitter):
 
 
 def main():
-    X_raw, y = build_raw()
+    global CHANNEL, USE_PLS, PLS_COMPONENTS, CUTOFF, RUN_LABEL
+    ap = argparse.ArgumentParser(
+        description="per-channel PLS + Wendland GP parity test"
+    )
+    ap.add_argument("--channel", default=CHANNEL, choices=list(CHANNEL_SLICES))
+    ap.add_argument("--cutoff", type=float, default=CUTOFF)
+    ap.add_argument(
+        "--cutoff-pct",
+        type=float,
+        default=None,
+        help="if set, cutoff = this percentile of embedding train distances "
+        "(auto-calibrate; e.g. 80). Overrides --cutoff.",
+    )
+    ap.add_argument("--pls-components", type=int, default=PLS_COMPONENTS)
+    ap.add_argument(
+        "--no-pls",
+        action="store_true",
+        help="use standardized channel " "features directly, skipping PLS",
+    )
+    a = ap.parse_args()
+    CHANNEL, USE_PLS, PLS_COMPONENTS, CUTOFF = (
+        a.channel,
+        not a.no_pls,
+        a.pls_components,
+        a.cutoff,
+    )
 
-    # split FIRST, then fit standardizer + PLS on train only (no label leakage)
-    Xr_tr, Xr_te, y_tr, y_te = train_test_split(
-        X_raw, y, test_size=TEST_FRACTION, random_state=RANDOM_STATE
+    X_raw, y = build_raw()
+    Xc = X_raw[:, CHANNEL_SLICES[CHANNEL]]
+    print(f"[channel] '{CHANNEL}' -> {Xc.shape[1]} raw dims")
+
+    Xc_tr, Xc_te, y_tr, y_te = train_test_split(
+        Xc, y, test_size=TEST_FRACTION, random_state=RANDOM_STATE
     )
     print(f"[split] train {len(y_tr)}  test {len(y_te)}  (random_state={RANDOM_STATE})")
 
-    Xs_tr, mean_, std_ = features.standardize(Xr_tr)  # train stats
-    Xs_te = (Xr_te - mean_) / std_  # apply to test
+    Xs_tr, mean_, std_ = features.standardize(Xc_tr)
+    Xs_te = (Xc_te - mean_) / std_
 
-    pls = PLSRegression(n_components=PLS_COMPONENTS, scale=False).fit(Xs_tr, y_tr)
-    Z_tr, Z_te = pls.transform(Xs_tr), pls.transform(Xs_te)
-    print(f"[pls] embedding train {Z_tr.shape} test {Z_te.shape} (fit on train only)")
+    if USE_PLS:
+        ncomp = min(PLS_COMPONENTS, Xc.shape[1])  # clamp for narrow channels
+        if ncomp < PLS_COMPONENTS:
+            print(
+                f"[pls] clamping components {PLS_COMPONENTS} -> {ncomp} (channel width)"
+            )
+        pls = PLSRegression(n_components=ncomp, scale=False).fit(Xs_tr, y_tr)
+        Z_tr, Z_te = pls.transform(Xs_tr), pls.transform(Xs_te)
+        embed = f"PLS{ncomp}"
+        print(f"[pls] embedding train {Z_tr.shape} (fit on train only)")
+    else:
+        Z_tr, Z_te = Xs_tr, Xs_te
+        embed = "raw"
+        print(f"[embed] using standardized channel features directly {Z_tr.shape}")
 
-    report_scale(Z_tr, Z_te)  # calibrate the cutoff before spending the solve
+    if a.cutoff_pct is not None:  # auto-calibrate the cutoff
+        CUTOFF = float(np.percentile(pdist(Z_tr, metric=NORM), a.cutoff_pct))
+        print(
+            f"[cutoff] set to {a.cutoff_pct:g}th pct of embedding distances = {CUTOFF:.4g}"
+        )
+
+    RUN_LABEL = f"{CHANNEL}-{embed}-{NORM_LABEL}"
+    report_scale(Z_tr, Z_te)
 
     signal_var = float(np.var(y_tr))
     mean, var, jitter = fit_with_jitter(Z_tr, y_tr, Z_te, signal_var)
-
     rmse = float(np.sqrt(np.mean((mean - y_te) ** 2)))
     r2 = float(r2_score(y_te, mean))
-    print(f"[result] RMSE = {rmse:.4g}   R^2 = {r2:.3f}   (final jitter {jitter:.0e})")
+    print(
+        f"[result] {RUN_LABEL}  RMSE = {rmse:.4g}   R^2 = {r2:.3f}   (jitter {jitter:.0e})"
+    )
     print(f"[saved] {parity_plot(y_te, mean, np.sqrt(var), rmse, r2, jitter)}")
 
 
