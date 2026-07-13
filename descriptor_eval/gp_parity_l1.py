@@ -26,6 +26,7 @@ Run from inside descriptor_eval/.
 import argparse
 import os
 import sys
+import time
 from datetime import datetime
 
 import matplotlib
@@ -335,6 +336,13 @@ def main():
     ap.add_argument("--wl-mode", default=WL_MODE, choices=["explicit", "hashed"])
     ap.add_argument("--wl-depth", type=int, default=WL_DEPTH)
     ap.add_argument("--include-depth0", action="store_true")
+    ap.add_argument(
+        "--min-count",
+        type=int,
+        default=2,
+        help="explicit vocab: keep WL labels in >= this many train mols "
+        "(2 drops singletons; raise to shrink D / speed up)",
+    )
     ap.add_argument("--metric", default="euclidean")
     ap.add_argument("--cutoff", type=float, default=CUTOFF)
     ap.add_argument(
@@ -365,14 +373,18 @@ def main():
     print(f"[split] train {len(y_tr)}  test {len(y_te)}  (random_state={RANDOM_STATE})")
 
     # WL featurizer: fit vocabulary on TRAIN only, transform both
+    t0 = time.perf_counter()
     feat = features.WLFeaturizer(
-        depth=WL_DEPTH, include_depth0=INCLUDE_DEPTH0, mode=WL_MODE
+        depth=WL_DEPTH,
+        include_depth0=INCLUDE_DEPTH0,
+        mode=WL_MODE,
+        min_count=a.min_count,
     )
     Xr_tr = feat.fit_transform(a_tr)
     Xr_te = feat.transform(a_te)
     print(
         f"[wl] mode={WL_MODE} depths={feat.depths_} D={feat.n_features_}  "
-        f"test OOV rate={feat.last_oov_rate_:.1%}"
+        f"test OOV rate={feat.last_oov_rate_:.1%}  ({time.perf_counter()-t0:.1f}s total)"
     )
 
     Xs_tr, mean_, std_ = features.standardize(Xr_tr)
@@ -384,10 +396,13 @@ def main():
             print(
                 f"[pls] clamping components {PLS_COMPONENTS} -> {ncomp} (feature width)"
             )
+        t0 = time.perf_counter()
         pls = PLSRegression(n_components=ncomp, scale=False).fit(Xs_tr, y_tr)
         Z_tr, Z_te = pls.transform(Xs_tr), pls.transform(Xs_te)
         embed = f"PLS{ncomp}"
-        print(f"[pls] embedding train {Z_tr.shape} (fit on train only)")
+        print(
+            f"[pls] embedding train {Z_tr.shape} (fit on train only, {time.perf_counter()-t0:.1f}s)"
+        )
     else:
         Z_tr, Z_te = Xs_tr, Xs_te
         embed = "raw"
@@ -403,10 +418,12 @@ def main():
     report_scale(Z_tr, Z_te)
 
     signal_var = float(np.var(y_tr))
+    t0 = time.perf_counter()
     if a.jitter is not None:
         mean, var, jitter = fit_single(Z_tr, y_tr, Z_te, a.jitter, signal_var)
     else:
         mean, var, jitter = fit_with_jitter(Z_tr, y_tr, Z_te, signal_var)
+    print(f"[gp] fit + predict in {time.perf_counter()-t0:.1f}s")
 
     rmse = float(np.sqrt(np.mean((mean - y_te) ** 2)))
     r2 = float(r2_score(y_te, mean))

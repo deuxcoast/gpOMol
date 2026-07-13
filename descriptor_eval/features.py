@@ -14,6 +14,7 @@ on the hybrid_descriptor package -- the eval framework is independent by design.
 from __future__ import annotations
 
 import hashlib
+import time
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -181,13 +182,23 @@ def wl_labels_per_depth(adjacency, node_labels, depth):
 
 @dataclass
 class WLFeaturizer:
-    """Fitted WL descriptor. explicit: exact per-depth count vocabulary (default).
-    hashed: legacy 256-bucket hashing (for A/B). Counts normalised per atom
-    (intensive) by default. Depth 0 dropped unless include_depth0=True."""
+    """Fitted WL descriptor.
+
+    explicit (default): EXACT per-depth count vocabulary, pruned by min_count
+      (drop labels occurring in fewer than min_count TRAIN molecules -- removes
+      the huge singleton tail of depth-3 patterns that only bloat D and can't
+      generalise). One pass over the molecules (graphs + WL labels computed once
+      and reused for both vocab-building and vectorising).
+    hashed: legacy 256-bucket hashing (for A/B).
+
+    Counts are per-atom normalised (intensive). Depth 0 dropped unless
+    include_depth0=True. Progress + per-phase timing are printed.
+    """
 
     depth: int = 3
     include_depth0: bool = False
     mode: str = "explicit"  # "explicit" | "hashed"
+    min_count: int = 2  # explicit: keep labels in >= this many train mols
     n_buckets: int = 256  # hashed mode only
     normalize: bool = True
     cutoff_mult: float = 1.2
@@ -198,51 +209,51 @@ class WLFeaturizer:
     def __post_init__(self):
         self.depths_ = list(range(0 if self.include_depth0 else 1, self.depth + 1))
 
-    def fit(self, atoms_list):
-        if self.mode == "hashed":
-            return self
-        vocab = {d: {} for d in self.depths_}
-        for atoms in atoms_list:
+    # --- one shared walk: graph + per-depth WL labels for each molecule --------
+    def _labels_for(self, atoms_list):
+        t0 = time.perf_counter()
+        out = []
+        for i, atoms in enumerate(atoms_list):
             adj, lab = build_graph(atoms, self.cutoff_mult)
-            pdl = wl_labels_per_depth(adj, lab, self.depth)
+            out.append((len(lab), wl_labels_per_depth(adj, lab, self.depth)))
+            if (i + 1) % 2000 == 0:
+                print(f"[wl]   ...labels {i + 1}/{len(atoms_list)}")
+        print(
+            f"[wl] extracted labels for {len(atoms_list)} mols in "
+            f"{time.perf_counter() - t0:.1f}s"
+        )
+        return out
+
+    def _build_vocab(self, labels_data):
+        df = {d: {} for d in self.depths_}  # label -> #molecules containing it
+        for _, pdl in labels_data:
             for d in self.depths_:
-                v = vocab[d]
                 for L in set(pdl[d]):
-                    if L not in v:
-                        v[L] = len(v)
+                    df[d][L] = df[d].get(L, 0) + 1
+        raw = sum(len(df[d]) for d in self.depths_)
+        vocab = {}
+        for d in self.depths_:
+            vocab[d] = {}
+            for L, c in df[d].items():
+                if c >= self.min_count:
+                    vocab[d][L] = len(vocab[d])
         self.vocab_ = vocab
-        return self
+        kept = sum(len(vocab[d]) for d in self.depths_)
+        print(
+            f"[wl] vocab: {raw} raw labels -> {kept} kept "
+            f"(min_count={self.min_count}); per-depth "
+            f"{ {d: len(vocab[d]) for d in self.depths_} }"
+        )
 
-    @property
-    def n_features_(self):
-        if self.mode == "hashed":
-            return self.n_buckets
-        return sum(len(self.vocab_[d]) for d in self.depths_)
-
-    def transform(self, atoms_list):
-        N = len(atoms_list)
-        if self.mode == "hashed":
-            X = np.zeros((N, self.n_buckets))
-            for i, atoms in enumerate(atoms_list):
-                adj, lab = build_graph(atoms, self.cutoff_mult)
-                pdl = wl_labels_per_depth(adj, lab, self.depth)
-                for d in self.depths_:
-                    for L in pdl[d]:
-                        X[i, _bucket(f"{d}:{L}", self.n_buckets)] += 1.0
-                if self.normalize:
-                    X[i] /= max(len(lab), 1)
-            self.last_oov_rate_ = 0.0
-            return X
-
+    def _vectorize(self, labels_data):
         offsets, off = {}, 0
         for d in self.depths_:
             offsets[d] = off
             off += len(self.vocab_[d])
-        X = np.zeros((N, off))
+        t0 = time.perf_counter()
+        X = np.zeros((len(labels_data), off))
         oov = tot = 0
-        for i, atoms in enumerate(atoms_list):
-            adj, lab = build_graph(atoms, self.cutoff_mult)
-            pdl = wl_labels_per_depth(adj, lab, self.depth)
+        for i, (n_atoms, pdl) in enumerate(labels_data):
             for d in self.depths_:
                 v, base = self.vocab_[d], offsets[d]
                 for L in pdl[d]:
@@ -252,10 +263,48 @@ class WLFeaturizer:
                         oov += 1
                         continue
                     X[i, base + j] += 1.0
-            if self.normalize:
-                X[i] /= max(len(lab), 1)
+            if self.normalize and n_atoms > 0:
+                X[i] /= n_atoms
         self.last_oov_rate_ = oov / max(tot, 1)
+        print(
+            f"[wl] vectorized {X.shape} in {time.perf_counter() - t0:.1f}s "
+            f"(dropped/OOV {self.last_oov_rate_:.1%} of label occurrences)"
+        )
         return X
 
+    def _hashed(self, atoms_list):
+        X = np.zeros((len(atoms_list), self.n_buckets))
+        for i, atoms in enumerate(atoms_list):
+            adj, lab = build_graph(atoms, self.cutoff_mult)
+            pdl = wl_labels_per_depth(adj, lab, self.depth)
+            for d in self.depths_:
+                for L in pdl[d]:
+                    X[i, _bucket(f"{d}:{L}", self.n_buckets)] += 1.0
+            if self.normalize:
+                X[i] /= max(len(lab), 1)
+        self.last_oov_rate_ = 0.0
+        return X
+
+    @property
+    def n_features_(self):
+        if self.mode == "hashed":
+            return self.n_buckets
+        return sum(len(self.vocab_[d]) for d in self.depths_)
+
+    def fit(self, atoms_list):
+        if self.mode == "hashed":
+            return self
+        self._build_vocab(self._labels_for(atoms_list))
+        return self
+
     def fit_transform(self, atoms_list):
-        return self.fit(atoms_list).transform(atoms_list)
+        if self.mode == "hashed":
+            return self._hashed(atoms_list)
+        ld = self._labels_for(atoms_list)  # single walk, reused below
+        self._build_vocab(ld)
+        return self._vectorize(ld)
+
+    def transform(self, atoms_list):
+        if self.mode == "hashed":
+            return self._hashed(atoms_list)
+        return self._vectorize(self._labels_for(atoms_list))
