@@ -327,6 +327,85 @@ def parity_plot(y_obs, y_pred, y_std, rmse, r2, jitter, nn_dist=None):
 # ------------------------------ main ----------------------------------------
 
 
+def evaluate(
+    a_tr,
+    y_tr,
+    a_te,
+    y_te,
+    *,
+    wl_mode="explicit",
+    wl_depth=3,
+    include_depth0=False,
+    min_count=2,
+    use_pls=True,
+    pls_components=10,
+    metric="euclidean",
+    cutoff=10.0,
+    cutoff_pct=None,
+    jitter=None,
+    verbose=True,
+):
+    """Shared pipeline: WL featurize (fit on train) -> standardize -> PLS ->
+    Wendland GP -> predict test. Sets the module globals the kernel reads and
+    returns everything needed for metrics/diagnostics. Used by main() and by the
+    learning-curve driver so there's a single source of truth."""
+    global NORM, NORM_LABEL, CUTOFF, RUN_LABEL
+    NORM = METRIC_ALIASES.get(metric.lower(), metric.lower())
+    NORM_LABEL = METRIC_LABELS.get(NORM, metric.upper())
+
+    t0 = time.perf_counter()
+    feat = features.WLFeaturizer(
+        depth=wl_depth, include_depth0=include_depth0, mode=wl_mode, min_count=min_count
+    )
+    Xr_tr = feat.fit_transform(a_tr)
+    Xr_te = feat.transform(a_te)
+    if verbose:
+        print(
+            f"[wl] mode={wl_mode} depths={feat.depths_} D={feat.n_features_}  "
+            f"test OOV rate={feat.last_oov_rate_:.1%}  ({time.perf_counter()-t0:.1f}s)"
+        )
+
+    Xs_tr, mean_, std_ = features.standardize(Xr_tr)
+    Xs_te = (Xr_te - mean_) / std_
+
+    if use_pls:
+        ncomp = min(pls_components, Xr_tr.shape[1])
+        pls = PLSRegression(n_components=ncomp, scale=False).fit(Xs_tr, y_tr)
+        Z_tr, Z_te = pls.transform(Xs_tr), pls.transform(Xs_te)
+        embed = f"PLS{ncomp}"
+    else:
+        Z_tr, Z_te, embed = Xs_tr, Xs_te, "raw"
+
+    CUTOFF = (
+        float(np.percentile(pdist(Z_tr, metric=NORM), cutoff_pct))
+        if cutoff_pct is not None
+        else cutoff
+    )
+    RUN_LABEL = f"WL-{wl_mode}-{embed}-{NORM_LABEL}"
+
+    signal_var = float(np.var(y_tr))
+    if jitter is not None:
+        mean, var, jit = fit_single(Z_tr, y_tr, Z_te, jitter, signal_var)
+    else:
+        mean, var, jit = fit_with_jitter(Z_tr, y_tr, Z_te, signal_var)
+
+    rmse = float(np.sqrt(np.mean((mean - y_te) ** 2)))
+    r2 = float(r2_score(y_te, mean))
+    return dict(
+        r2=r2,
+        rmse=rmse,
+        jitter=jit,
+        n_train=len(y_tr),
+        D=feat.n_features_,
+        oov=feat.last_oov_rate_,
+        cutoff=CUTOFF,
+        mean=mean,
+        var=var,
+        Z_tr=Z_tr,
+        Z_te=Z_te,
+    )
+
+
 def main():
     global WL_MODE, WL_DEPTH, INCLUDE_DEPTH0, USE_PLS, PLS_COMPONENTS, CUTOFF
     global RUN_LABEL, NORM, NORM_LABEL
@@ -359,82 +438,56 @@ def main():
         default=None,
         help="single fixed diagonal noise (eV^2), skip the escalating loop",
     )
+    ap.add_argument(
+        "--subsample",
+        type=int,
+        default=None,
+        help="use only the first N TRAIN molecules (test set held fixed); "
+        "for learning-curve experiments",
+    )
     a = ap.parse_args()
     WL_MODE, WL_DEPTH, INCLUDE_DEPTH0 = a.wl_mode, a.wl_depth, a.include_depth0
     USE_PLS, PLS_COMPONENTS, CUTOFF = not a.no_pls, a.pls_components, a.cutoff
-    NORM = METRIC_ALIASES.get(a.metric.lower(), a.metric.lower())
-    NORM_LABEL = METRIC_LABELS.get(NORM, a.metric.upper())
-    print(f"[metric] {a.metric} -> scipy '{NORM}' (label {NORM_LABEL})")
+    print(f"[metric] {a.metric}")
 
     atoms, y = build_atoms()
     a_tr, a_te, y_tr, y_te = train_test_split(
         atoms, y, test_size=TEST_FRACTION, random_state=RANDOM_STATE
     )
+    if a.subsample is not None and a.subsample < len(a_tr):
+        a_tr, y_tr = a_tr[: a.subsample], y_tr[: a.subsample]  # nested prefix subset
+        print(f"[subsample] train -> {len(a_tr)} (test held fixed at {len(y_te)})")
     print(f"[split] train {len(y_tr)}  test {len(y_te)}  (random_state={RANDOM_STATE})")
 
-    # WL featurizer: fit vocabulary on TRAIN only, transform both
-    t0 = time.perf_counter()
-    feat = features.WLFeaturizer(
-        depth=WL_DEPTH,
+    res = evaluate(
+        a_tr,
+        y_tr,
+        a_te,
+        y_te,
+        wl_mode=WL_MODE,
+        wl_depth=WL_DEPTH,
         include_depth0=INCLUDE_DEPTH0,
-        mode=WL_MODE,
         min_count=a.min_count,
+        use_pls=USE_PLS,
+        pls_components=PLS_COMPONENTS,
+        metric=a.metric,
+        cutoff=a.cutoff,
+        cutoff_pct=a.cutoff_pct,
+        jitter=a.jitter,
     )
-    Xr_tr = feat.fit_transform(a_tr)
-    Xr_te = feat.transform(a_te)
-    print(
-        f"[wl] mode={WL_MODE} depths={feat.depths_} D={feat.n_features_}  "
-        f"test OOV rate={feat.last_oov_rate_:.1%}  ({time.perf_counter()-t0:.1f}s total)"
-    )
+    print(f"[wl] D={res['D']}  test OOV={res['oov']:.1%}   cutoff={res['cutoff']:.4g}")
 
-    Xs_tr, mean_, std_ = features.standardize(Xr_tr)
-    Xs_te = (Xr_te - mean_) / std_
-
-    if USE_PLS:
-        ncomp = min(PLS_COMPONENTS, Xr_tr.shape[1])
-        if ncomp < PLS_COMPONENTS:
-            print(
-                f"[pls] clamping components {PLS_COMPONENTS} -> {ncomp} (feature width)"
-            )
-        t0 = time.perf_counter()
-        pls = PLSRegression(n_components=ncomp, scale=False).fit(Xs_tr, y_tr)
-        Z_tr, Z_te = pls.transform(Xs_tr), pls.transform(Xs_te)
-        embed = f"PLS{ncomp}"
-        print(
-            f"[pls] embedding train {Z_tr.shape} (fit on train only, {time.perf_counter()-t0:.1f}s)"
-        )
-    else:
-        Z_tr, Z_te = Xs_tr, Xs_te
-        embed = "raw"
-        print(f"[embed] standardized WL features directly {Z_tr.shape}")
-
-    if a.cutoff_pct is not None:
-        CUTOFF = float(np.percentile(pdist(Z_tr, metric=NORM), a.cutoff_pct))
-        print(
-            f"[cutoff] set to {a.cutoff_pct:g}th pct of embedding distances = {CUTOFF:.4g}"
-        )
-
-    RUN_LABEL = f"WL-{WL_MODE}-{embed}-{NORM_LABEL}"
+    Z_tr, Z_te, mean, var = res["Z_tr"], res["Z_te"], res["mean"], res["var"]
     report_scale(Z_tr, Z_te)
-
-    signal_var = float(np.var(y_tr))
-    t0 = time.perf_counter()
-    if a.jitter is not None:
-        mean, var, jitter = fit_single(Z_tr, y_tr, Z_te, a.jitter, signal_var)
-    else:
-        mean, var, jitter = fit_with_jitter(Z_tr, y_tr, Z_te, signal_var)
-    print(f"[gp] fit + predict in {time.perf_counter()-t0:.1f}s")
-
-    rmse = float(np.sqrt(np.mean((mean - y_te) ** 2)))
-    r2 = float(r2_score(y_te, mean))
     print(
-        f"[result] {RUN_LABEL}  RMSE = {rmse:.4g}   R^2 = {r2:.3f}   (jitter {jitter:g})"
+        f"[result] {RUN_LABEL}  RMSE = {res['rmse']:.4g}   R^2 = {res['r2']:.3f}   "
+        f"(jitter {res['jitter']:g})"
     )
 
     nn = nn_distances(Z_te, Z_tr)
     med, rms, base = error_vs_distance(nn, y_te, mean)
     print(
-        f"[saved] {parity_plot(y_te, mean, np.sqrt(var), rmse, r2, jitter, nn_dist=nn)}"
+        f"[saved] {parity_plot(y_te, mean, np.sqrt(var), res['rmse'], res['r2'], res['jitter'], nn_dist=nn)}"
     )
     if len(med) >= 2:
         print(f"[saved] {plot_error_vs_distance(med, rms, base)}")
