@@ -327,6 +327,37 @@ def parity_plot(y_obs, y_pred, y_std, rmse, r2, jitter, nn_dist=None):
 # ------------------------------ main ----------------------------------------
 
 
+def _reduce(Xs_tr, y_tr, Xs_te, reduction, k, svd_predims):
+    """Dimensionality reduction to the GP embedding. Returns (Z_tr, Z_te, label).
+    none          : standardized features as-is
+    pls           : supervised PLS(k)  [current default]
+    pca / svd     : unsupervised TruncatedSVD(k) (== PCA on centered input)
+    svd_then_pls  : TruncatedSVD(svd_predims) then supervised PLS(k) -- the
+                    sparse-scalable way to keep the y-aware benefit at 200k."""
+    if reduction == "none":
+        return Xs_tr, Xs_te, "raw"
+    if reduction == "pls":
+        ncomp = min(k, Xs_tr.shape[1])
+        pls = PLSRegression(n_components=ncomp, scale=False).fit(Xs_tr, y_tr)
+        return pls.transform(Xs_tr), pls.transform(Xs_te), f"PLS{ncomp}"
+    if reduction in ("pca", "svd", "truncatedsvd"):
+        from sklearn.decomposition import TruncatedSVD
+
+        ncomp = min(k, Xs_tr.shape[1] - 1)
+        svd = TruncatedSVD(n_components=ncomp, random_state=0).fit(Xs_tr)
+        return svd.transform(Xs_tr), svd.transform(Xs_te), f"SVD{ncomp}"
+    if reduction == "svd_then_pls":
+        from sklearn.decomposition import TruncatedSVD
+
+        pre = min(svd_predims, Xs_tr.shape[1] - 1)
+        svd = TruncatedSVD(n_components=pre, random_state=0).fit(Xs_tr)
+        T_tr, T_te = svd.transform(Xs_tr), svd.transform(Xs_te)
+        ncomp = min(k, pre)
+        pls = PLSRegression(n_components=ncomp, scale=False).fit(T_tr, y_tr)
+        return pls.transform(T_tr), pls.transform(T_te), f"SVD{pre}>PLS{ncomp}"
+    raise ValueError(f"unknown reduction '{reduction}'")
+
+
 def evaluate(
     a_tr,
     y_tr,
@@ -339,6 +370,8 @@ def evaluate(
     min_count=2,
     use_pls=True,
     pls_components=10,
+    reduction=None,
+    svd_predims=200,
     metric="euclidean",
     cutoff=10.0,
     cutoff_pct=None,
@@ -368,13 +401,11 @@ def evaluate(
     Xs_tr, mean_, std_ = features.standardize(Xr_tr)
     Xs_te = (Xr_te - mean_) / std_
 
-    if use_pls:
-        ncomp = min(pls_components, Xr_tr.shape[1])
-        pls = PLSRegression(n_components=ncomp, scale=False).fit(Xs_tr, y_tr)
-        Z_tr, Z_te = pls.transform(Xs_tr), pls.transform(Xs_te)
-        embed = f"PLS{ncomp}"
-    else:
-        Z_tr, Z_te, embed = Xs_tr, Xs_te, "raw"
+    if reduction is None:
+        reduction = "pls" if use_pls else "none"
+    Z_tr, Z_te, embed = _reduce(
+        Xs_tr, y_tr, Xs_te, reduction, pls_components, svd_predims
+    )
 
     CUTOFF = (
         float(np.percentile(pdist(Z_tr, metric=NORM), cutoff_pct))
@@ -399,6 +430,7 @@ def evaluate(
         D=feat.n_features_,
         oov=feat.last_oov_rate_,
         cutoff=CUTOFF,
+        embed=embed,
         mean=mean,
         var=var,
         Z_tr=Z_tr,
