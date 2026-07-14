@@ -33,7 +33,7 @@ import numpy as np
 from sklearn.model_selection import train_test_split
 
 matplotlib.use("Agg")
-import gp_parity_l1 as gp
+import gp_parity as gp
 import matplotlib.pyplot as plt
 
 # ------------------------------ larger-than-cache pool ----------------------

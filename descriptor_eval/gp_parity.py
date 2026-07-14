@@ -327,13 +327,16 @@ def parity_plot(y_obs, y_pred, y_std, rmse, r2, jitter, nn_dist=None):
 # ------------------------------ main ----------------------------------------
 
 
-def _reduce(Xs_tr, y_tr, Xs_te, reduction, k, svd_predims):
+def _reduce(Xs_tr, y_tr, Xs_te, reduction, k, svd_predims, screen_k):
     """Dimensionality reduction to the GP embedding. Returns (Z_tr, Z_te, label).
-    none          : standardized features as-is
-    pls           : supervised PLS(k)  [current default]
-    pca / svd     : unsupervised TruncatedSVD(k) (== PCA on centered input)
-    svd_then_pls  : TruncatedSVD(svd_predims) then supervised PLS(k) -- the
-                    sparse-scalable way to keep the y-aware benefit at 200k."""
+    none            : standardized features as-is
+    pls             : supervised PLS(k)  [current default]
+    pca / svd       : unsupervised TruncatedSVD(k) (== PCA on centered input)
+    svd_then_pls    : TruncatedSVD(svd_predims) then supervised PLS(k)
+    screen_then_pls : SUPERVISED univariate prescreen -- keep the screen_k
+                      columns most correlated with y (one sparse-friendly matvec,
+                      no densify), then dense PLS(k) on those. Sparse-scalable AND
+                      keeps the low-variance y-aware signal SVD threw away."""
     if reduction == "none":
         return Xs_tr, Xs_te, "raw"
     if reduction == "pls":
@@ -355,6 +358,15 @@ def _reduce(Xs_tr, y_tr, Xs_te, reduction, k, svd_predims):
         ncomp = min(k, pre)
         pls = PLSRegression(n_components=ncomp, scale=False).fit(T_tr, y_tr)
         return pls.transform(T_tr), pls.transform(T_te), f"SVD{pre}>PLS{ncomp}"
+    if reduction == "screen_then_pls":
+        yc = y_tr - y_tr.mean()
+        scores = np.abs(Xs_tr.T @ yc)  # |corr| ranking (Xs is standardized)
+        sk = min(screen_k, Xs_tr.shape[1])
+        top = np.argsort(scores)[::-1][:sk]
+        Xt_tr, Xt_te = Xs_tr[:, top], Xs_te[:, top]
+        ncomp = min(k, sk)
+        pls = PLSRegression(n_components=ncomp, scale=False).fit(Xt_tr, y_tr)
+        return pls.transform(Xt_tr), pls.transform(Xt_te), f"SCR{sk}>PLS{ncomp}"
     raise ValueError(f"unknown reduction '{reduction}'")
 
 
@@ -372,6 +384,7 @@ def evaluate(
     pls_components=10,
     reduction=None,
     svd_predims=200,
+    screen_k=300,
     metric="euclidean",
     cutoff=10.0,
     cutoff_pct=None,
@@ -386,51 +399,100 @@ def evaluate(
     NORM = METRIC_ALIASES.get(metric.lower(), metric.lower())
     NORM_LABEL = METRIC_LABELS.get(NORM, metric.upper())
 
+    Xs_tr, Xs_te, feat = featurize_wl(
+        a_tr,
+        a_te,
+        wl_mode=wl_mode,
+        wl_depth=wl_depth,
+        include_depth0=include_depth0,
+        min_count=min_count,
+        verbose=verbose,
+    )
+    if reduction is None:
+        reduction = "pls" if use_pls else "none"
+    Z_tr, Z_te, embed = _reduce(
+        Xs_tr, y_tr, Xs_te, reduction, pls_components, svd_predims, screen_k
+    )
+
+    res = gp_eval_embedding(
+        Z_tr,
+        y_tr,
+        Z_te,
+        y_te,
+        metric=metric,
+        cutoff=cutoff,
+        cutoff_pct=cutoff_pct,
+        jitter=jitter,
+    )
+    RUN_LABEL = f"WL-{wl_mode}-{embed}-{NORM_LABEL}"
+    res.update(
+        n_train=len(y_tr), D=feat.n_features_, oov=feat.last_oov_rate_, embed=embed
+    )
+    return res
+
+
+def featurize_wl(
+    a_tr,
+    a_te,
+    *,
+    wl_mode="explicit",
+    wl_depth=3,
+    include_depth0=False,
+    min_count=2,
+    verbose=True,
+):
+    """Fit the WL vocabulary on TRAIN, transform both, standardize (train stats).
+    Returns (Xs_tr, Xs_te, featurizer). Factored out so a caller can featurize once
+    and then reduce/evaluate many times (e.g. a cutoff sweep)."""
     t0 = time.perf_counter()
     feat = features.WLFeaturizer(
         depth=wl_depth, include_depth0=include_depth0, mode=wl_mode, min_count=min_count
     )
     Xr_tr = feat.fit_transform(a_tr)
     Xr_te = feat.transform(a_te)
+    Xs_tr, mean_, std_ = features.standardize(Xr_tr)
+    Xs_te = (Xr_te - mean_) / std_
     if verbose:
         print(
             f"[wl] mode={wl_mode} depths={feat.depths_} D={feat.n_features_}  "
             f"test OOV rate={feat.last_oov_rate_:.1%}  ({time.perf_counter()-t0:.1f}s)"
         )
+    return Xs_tr, Xs_te, feat
 
-    Xs_tr, mean_, std_ = features.standardize(Xr_tr)
-    Xs_te = (Xr_te - mean_) / std_
 
-    if reduction is None:
-        reduction = "pls" if use_pls else "none"
-    Z_tr, Z_te, embed = _reduce(
-        Xs_tr, y_tr, Xs_te, reduction, pls_components, svd_predims
-    )
-
+def gp_eval_embedding(
+    Z_tr,
+    y_tr,
+    Z_te,
+    y_te,
+    *,
+    metric="euclidean",
+    cutoff=10.0,
+    cutoff_pct=None,
+    jitter=None,
+):
+    """Wendland GP on a precomputed embedding. Sets the module globals the kernel
+    reads (NORM, CUTOFF). Raises RuntimeError if non-PD up to the jitter ceiling."""
+    global NORM, NORM_LABEL, CUTOFF
+    NORM = METRIC_ALIASES.get(metric.lower(), metric.lower())
+    NORM_LABEL = METRIC_LABELS.get(NORM, metric.upper())
     CUTOFF = (
         float(np.percentile(pdist(Z_tr, metric=NORM), cutoff_pct))
         if cutoff_pct is not None
         else cutoff
     )
-    RUN_LABEL = f"WL-{wl_mode}-{embed}-{NORM_LABEL}"
-
     signal_var = float(np.var(y_tr))
     if jitter is not None:
         mean, var, jit = fit_single(Z_tr, y_tr, Z_te, jitter, signal_var)
     else:
         mean, var, jit = fit_with_jitter(Z_tr, y_tr, Z_te, signal_var)
-
     rmse = float(np.sqrt(np.mean((mean - y_te) ** 2)))
     r2 = float(r2_score(y_te, mean))
     return dict(
         r2=r2,
         rmse=rmse,
         jitter=jit,
-        n_train=len(y_tr),
-        D=feat.n_features_,
-        oov=feat.last_oov_rate_,
         cutoff=CUTOFF,
-        embed=embed,
         mean=mean,
         var=var,
         Z_tr=Z_tr,
@@ -464,6 +526,32 @@ def main():
     )
     ap.add_argument("--pls-components", type=int, default=PLS_COMPONENTS)
     ap.add_argument("--no-pls", action="store_true")
+    ap.add_argument(
+        "--reduction",
+        default=None,
+        choices=[
+            "none",
+            "pls",
+            "pca",
+            "svd",
+            "truncatedsvd",
+            "svd_then_pls",
+            "screen_then_pls",
+        ],
+        help="reduction method (default: pls, or none with --no-pls)",
+    )
+    ap.add_argument(
+        "--svd-predims",
+        type=int,
+        default=200,
+        help="pre-reduction dims for --reduction svd_then_pls",
+    )
+    ap.add_argument(
+        "--screen-k",
+        type=int,
+        default=300,
+        help="columns kept by supervised prescreen for screen_then_pls",
+    )
     ap.add_argument(
         "--jitter",
         type=float,
@@ -502,6 +590,9 @@ def main():
         min_count=a.min_count,
         use_pls=USE_PLS,
         pls_components=PLS_COMPONENTS,
+        reduction=a.reduction,
+        svd_predims=a.svd_predims,
+        screen_k=a.screen_k,
         metric=a.metric,
         cutoff=a.cutoff,
         cutoff_pct=a.cutoff_pct,
