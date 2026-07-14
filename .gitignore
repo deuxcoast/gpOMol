@@ -2,6 +2,8 @@
 train_4M/
 *.png
 *.svg
+descriptor_eval/*/*.npy
+descriptor_eval/*/*.npz
 hybrid_descriptor/*.npy
 hybrid_descriptor/*.npz
 gp/*/*.npy
