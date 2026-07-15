@@ -20,7 +20,8 @@ from __future__ import annotations
 import numpy as np
 
 from . import cutoff as cutoff_mod
-from .kernel import check_kernel_psd, dense_wendland_reference, make_wl_block_kernel
+from .kernel import (check_kernel_diagonal, check_kernel_psd,
+                     dense_wendland_reference, make_wl_block_kernel)
 from .pipeline import _first, build_gp, predict, with_category_tag
 from .reduce import SparsePLS, batch_pls_r2, regression_r2
 
@@ -119,6 +120,23 @@ def streaming_pls_parity(X_tr, y_tr, X_te, y_te, n_components=10, tol=0.02):
 # ----------------------------- 5: PD guard ---------------------------------
 
 
+def diagonal_guard(Z_sample, cutoff, signal_var, backend="wendland32"):
+    """Regression guard: K[i,i] must be EXACTLY signal_var. Catches a distance
+    backend returning nonzero self-distances (torch.cdist's mm expansion), which
+    silently corrupts the solve on this near-singular Gram instead of erroring."""
+    dim = Z_sample.shape[1]
+    kern = make_wl_block_kernel(cutoff, dim=dim, use_category_tag=False,
+                                backend=backend, device="cpu")
+    res = check_kernel_diagonal(kern, Z_sample, signal_var)
+    print(
+        f"[val] diagonal [{backend}]: max err={res['max_diag_err']:.3e} "
+        f"(rel {res['rel_diag_err']:.1e}) diag=[{res['diag_min']:.6f},"
+        f"{res['diag_max']:.6f}] expected={signal_var:.6f} -> "
+        f"{'PASS' if res['pass'] else 'FAIL'}"
+    )
+    return res
+
+
 def psd_guard(Z_sample, cutoff, backend="wendland32", tol=1e-8):
     dim = Z_sample.shape[1]
     kern = make_wl_block_kernel(cutoff, dim=dim, use_category_tag=False,
@@ -194,9 +212,10 @@ def main():
     # 2: sparsity / memory (with category block-sparsity)
     sparsity(Z_tr, cutoff, dim=Z_tr.shape[1], data_id=cat_tr)
 
-    # 5: PD guard (both backends)
+    # 5: PD guard (both backends) + exact-diagonal regression guard
     psd_guard(Z_tr[: min(1500, len(Z_tr))], cutoff, backend="wendland32")
     psd_guard(Z_tr[: min(1500, len(Z_tr))], cutoff, backend="wendland_d0")
+    diagonal_guard(Z_tr[: min(1500, len(Z_tr))], cutoff, float(np.var(y_tr)))
 
     # 1 + 3: parity + CG on a parity-sized slice, single dummy category
     k = min(args.parity_n, len(Z_tr))

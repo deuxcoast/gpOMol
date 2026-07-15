@@ -164,9 +164,16 @@ def build_gp(
     linalg_mode="sparseCG",
     compute_device="gpu",
     device=None,
+    dtype="float64",
     cutoff_is_hp=False,
 ):
-    """Construct the gp2Scale GPOptimizer with the sparse GPU block kernel."""
+    """Construct the gp2Scale GPOptimizer with the sparse GPU block kernel.
+
+    dtype defaults to float64 on purpose: this Gram is near-singular (cond ~1e9),
+    so float32 kernel error amplifies into a wrong solve. An earlier version of this
+    function did not forward dtype at all, silently running the kernel in float32
+    while the dense reference ran float64 -- that alone moved R^2 from 0.049 to 0.027.
+    """
     require_imate()
     from gpcam import GPOptimizer
 
@@ -176,6 +183,7 @@ def build_gp(
         use_category_tag=True,
         backend=backend,
         device=device,
+        dtype=dtype,
         cutoff_is_hp=cutoff_is_hp,
     )
     sv = float(signal_var) if signal_var is not None else float(np.var(y_tr))

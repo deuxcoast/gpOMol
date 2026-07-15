@@ -140,7 +140,10 @@ class WLBlockKernel:
     device : str | None
         Torch device; None -> cuda if available else cpu.
     dtype : str
-        "float32" (default, GPU-friendly) or "float64" (tighter parity vs SciPy).
+        "float64" (default) or "float32". Keep float64: the Wendland Gram on this
+        embedding is near-singular (compact support + duplicate molecules => cond
+        ~1e9), so float32's ~1e-7 kernel error amplifies into a materially wrong
+        solve. float32 is only safe if you have verified the conditioning.
     cutoff_is_hp : bool
         If True, ``hps[1]`` overrides the cutoff (lets the optimiser tune support).
 
@@ -153,7 +156,7 @@ class WLBlockKernel:
     backend: str = "wendland32"
     k: int = 2
     device: Optional[str] = None
-    dtype: str = "float32"
+    dtype: str = "float64"
     cutoff_is_hp: bool = False
 
     def __post_init__(self):
@@ -200,7 +203,19 @@ class WLBlockKernel:
         b = torch.as_tensor(c2, dtype=td, device=dev)
 
         # 2. on-GPU L2 distance + compact-support Wendland (worker-local dense block)
-        D = torch.cdist(a, b)                       # (n1, n2)
+        #
+        # compute_mode is load-bearing, do NOT drop it. torch.cdist defaults to
+        # "use_mm_for_euclid_dist_if_necessary", which computes the Gram expansion
+        # ||a||^2 + ||b||^2 - 2 a.b. That suffers catastrophic cancellation for
+        # identical / near-identical points and returns a NONZERO self-distance
+        # (3e-5 in float32, 9e-10 even in float64), so psi(r) < 1 on the diagonal
+        # and K[i,i] comes out below signal_var. Measured on the real embedding this
+        # perturbs K by ~2e-4 relative -- harmless on its own, but cond(K) ~ 1e9 here
+        # (compact support + duplicate molecules => near-singular Gram), so it
+        # amplifies into a badly wrong solve: R^2 0.049 -> 0.027 with the sparse path
+        # while the dense scipy.cdist path was fine. The direct mode matches scipy
+        # exactly. It forgoes the matmul kernel, but D=10 makes the direct form cheap.
+        D = torch.cdist(a, b, compute_mode="donot_use_mm_for_euclid_dist")
         t = torch.clamp(D / cutoff, 0.0, 1.0)
         K = self._psi(t)
         K = torch.where(t < 1.0, K, torch.zeros_like(K))   # hard compact support
@@ -245,6 +260,31 @@ def dense_wendland_reference(x1, x2, hps, cutoff, dim=None, metric="euclidean"):
 # ----------------------------------------------------------------------------
 # PD falsification guard
 # ----------------------------------------------------------------------------
+
+
+def check_kernel_diagonal(kernel_fn: Callable, X_sample, signal_var: float,
+                          tol: float = 1e-10) -> dict:
+    """The Wendland diagonal must be EXACTLY signal_var: psi(0)=1 and the distance
+    from a point to itself is exactly 0.
+
+    A drifting diagonal means the distance backend is returning nonzero self-
+    distances -- which is precisely what torch.cdist's default mm expansion does
+    (3e-5 in float32, 9e-10 in float64). On this near-singular Gram (cond ~1e9) that
+    silently corrupts the solve rather than erroring. Regression guard for the
+    compute_mode / dtype fix; run it whenever the kernel's numerics change."""
+    K = kernel_fn(X_sample, X_sample, np.asarray([signal_var], dtype=float))
+    if sp.issparse(K):
+        K = K.toarray()
+    d = np.diag(np.asarray(K, dtype=float))
+    err = float(np.max(np.abs(d - signal_var)))
+    scale = max(abs(signal_var), 1.0)
+    return {
+        "max_diag_err": err,
+        "rel_diag_err": err / scale,
+        "pass": bool(err <= tol * scale),
+        "diag_min": float(d.min()),
+        "diag_max": float(d.max()),
+    }
 
 
 def check_kernel_psd(kernel_fn: Callable, X_sample, hps, tol: float = 1e-8) -> dict:
