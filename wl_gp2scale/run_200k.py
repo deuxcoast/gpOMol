@@ -54,7 +54,10 @@ def build_argparser():
     ap.add_argument("--depth", type=int, default=3)
     ap.add_argument("--pls", type=int, default=10)
     ap.add_argument("--cutoff-pct", type=float, default=25.0)
-    ap.add_argument("--vocab-sample", type=int, default=20_000)
+    ap.add_argument("--vocab-sample", type=int, default=0,
+                    help="0 = fit WL vocab on ALL train molecules (recommended: no "
+                         "train OOV, no dropped signal). >0 caps it to a stratified "
+                         "sample of that many molecules if memory/time bites.")
     ap.add_argument("--chunk", type=int, default=500, help="molecules per WL task")
     ap.add_argument("--batch-size", type=int, default=10_000, help="gp2Scale block")
     ap.add_argument("--backend", default="wendland32",

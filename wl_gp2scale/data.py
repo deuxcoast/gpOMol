@@ -167,18 +167,29 @@ def get_data(
 
 
 def stratified_sample_indices(data_id: np.ndarray, size: int, seed: int = 0) -> np.ndarray:
-    """Indices of a representative sample covering EVERY category proportionally
-    (min 1 per category). Used to fit/freeze the WL vocabulary so it spans all
-    categories/elements before the full transform."""
+    """Indices of a representative sample covering EVERY category (min 1 each), and
+    actually reaching ``size`` when the data allows.
+
+    Categories smaller than ``size // n_categories`` would otherwise leave the sample
+    short (e.g. 11,228 instead of 20,000 across 10 OMol25 categories), which inflates
+    the WL out-of-vocabulary rate. So we top up from the remainder after the
+    per-category pass. If ``size >= len(data_id)`` every index is returned."""
+    data_id = np.asarray(data_id)
+    n = len(data_id)
+    if size >= n:
+        return np.arange(n)
     rng = np.random.default_rng(seed)
     cats = np.unique(data_id)
     per = max(1, size // len(cats))
     picks = []
     for c in cats:
         idx = np.where(data_id == c)[0]
-        take = min(len(idx), per)
-        picks.append(rng.choice(idx, size=take, replace=False))
+        picks.append(rng.choice(idx, size=min(len(idx), per), replace=False))
     out = np.concatenate(picks)
-    if len(out) > size:
+    if len(out) < size:
+        rest = np.setdiff1d(np.arange(n), out)
+        extra = rng.choice(rest, size=min(len(rest), size - len(out)), replace=False)
+        out = np.concatenate([out, extra])
+    elif len(out) > size:
         out = rng.choice(out, size=size, replace=False)
     return np.sort(out)

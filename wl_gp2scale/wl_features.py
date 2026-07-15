@@ -201,9 +201,16 @@ class SparseWLFeaturizer:
         t0 = time.perf_counter()
 
         if client is not None:
-            # Dask: scatter the (small) frozen spec once, map chunks.
-            spec_f = client.scatter(spec, broadcast=True)
-            futs = client.map(_vectorize_chunk, parts, [spec_f] * len(parts))
+            # Scatter the frozen spec once. NOTE the [spec] list-wrap: client.scatter
+            # on a bare dict is interpreted as a {key: value} MAPPING, which would
+            # publish cluster keys named after our dict's keys ('vocab', 'cutoff_mult',
+            # ...). Those get released after the first batch -> workers then fail with
+            # "Could not find data: ['cutoff_mult']" and the run hangs.
+            spec_f = client.scatter([spec], broadcast=True)[0]
+            # Ship molecule chunks as scattered DATA rather than embedding them in the
+            # task graph (otherwise the graph is ~120 MiB at 20k, ~1.5 GiB at 200k).
+            part_futs = client.scatter(parts)
+            futs = client.map(_vectorize_chunk, part_futs, [spec_f] * len(parts))
             results = client.gather(futs)
         elif n_procs and n_procs > 1:
             import multiprocessing as mp
