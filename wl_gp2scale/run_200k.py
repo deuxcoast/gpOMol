@@ -30,11 +30,15 @@ def plot_parity(y_true, y_pred, std, out_path, r2, rmse, n_train):
 
     lo = float(min(y_true.min(), y_pred.min()))
     hi = float(max(y_true.max(), y_pred.max()))
+    have_std = std is not None and np.isfinite(std).any()
     with plt.style.context("fivethirtyeight"):
         fig, ax = plt.subplots(figsize=(7, 7))
-        sc = ax.scatter(y_true, y_pred, c=std, s=8, cmap="viridis", alpha=0.6)
+        if have_std:
+            sc = ax.scatter(y_true, y_pred, c=std, s=8, cmap="viridis", alpha=0.6)
+            cb = fig.colorbar(sc, ax=ax); cb.set_label("posterior std")
+        else:  # --no-variance: nothing to colour by
+            ax.scatter(y_true, y_pred, s=8, color="#348ABD", alpha=0.6)
         ax.plot([lo, hi], [lo, hi], "k--", lw=1.5, label="y = x")
-        cb = fig.colorbar(sc, ax=ax); cb.set_label("posterior std")
         ax.set_xlabel("true residual  y = E − m(x)")
         ax.set_ylabel("predicted residual")
         ax.set_title(f"wl_gp2scale parity — N_train={n_train:,}\n"
@@ -70,6 +74,14 @@ def build_argparser():
                     help="default $SCRATCH/scheduler_file_gpOmol.json")
     ap.add_argument("--workers", type=int, default=16)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--predict-batch", type=int, default=500,
+                    help="test points per prediction batch; bounds the DENSE "
+                         "cross-covariance k (n_train x batch)")
+    ap.add_argument("--no-variance", action="store_true",
+                    help="mean only. posterior_covariance costs ONE SOLVE PER TEST "
+                         "POINT on the full NxN system -- at 200k that is the "
+                         "dominant cost. Use with a large test set; keep the test "
+                         "set in the hundreds if you want variance.")
     ap.add_argument("--train", action="store_true",
                     help="marginal-likelihood training (needs imate)")
     ap.add_argument("--out", default="cache/preds_200k.npz")
@@ -129,8 +141,14 @@ def main():
         hps = train_hyperparameters(gp, bounds, max_iter=50)
         print(f"[run] trained hyperparameters: {hps}")
 
-    print("[run] predicting on test set ...")
-    m, v = predict(gp, X_te)
+    want_var = not args.no_variance
+    print(f"[run] predicting on {len(X_te):,} test points "
+          f"(batch={args.predict_batch}, variance={want_var}) ...")
+    if want_var and len(X_te) > 1000:
+        print(f"[run] WARNING: variance costs ~1 solve per test point on the "
+              f"{len(y_tr):,}-point system; {len(X_te):,} test points may take "
+              f"hours. Consider --no-variance or a smaller --test-size.")
+    m, v = predict(gp, X_te, batch=args.predict_batch, variance=want_var, verbose=True)
     E_pred_resid = m
     rmse = float(np.sqrt(np.mean((m - y_te) ** 2)))
     r2 = float(r2_score(y_te, m))
