@@ -61,15 +61,18 @@ jitter 1e-6, streaming-PLS R² == batch-PLS R², kernel PSD.
 ```bash
 # local CPU smoke test (a few dask workers, no allocation needed)
 python -m wl_gp2scale.validate --n 20000 --device cpu --workers 4
+# to compare R² apples-to-apples with descriptor_eval/gp_parity.py add: --min-count 2
 
-# single GPU node
+# single GPU node (uses the srun-launched workers for proper per-task GPU binding)
 ./allocate_GPUs.sh 1 4
-./launch-dask-moduleGPU.sh 4          # (or use validate's built-in local Client)
-python -m wl_gp2scale.validate --n 50000 --device cuda
+./launch-dask-moduleGPU.sh 4
+python -m wl_gp2scale.validate --n 50000 --device cuda --workers 4 \
+    --scheduler-file $SCRATCH/scheduler_file_gpOmol.json
 ```
-All five checks print `PASS`/values. If parity fails or CG stalls: **tighten the
-cutoff** (`--cutoff-pct` lower) rather than adding jitter, or switch
-`--backend wendland_d0` (PD on R¹⁰ by construction).
+All five checks print `PASS`/values, including **predictive R² vs truth** (compare
+to gp_parity.py ~0.09–0.12). If parity fails or CG stalls: **tighten the cutoff**
+(`--cutoff-pct` lower) rather than adding jitter, or switch `--backend wendland_d0`
+(PD on R¹⁰ by construction).
 
 ## 2. Full run (200k, 16 GPUs)
 ```bash
@@ -81,9 +84,16 @@ Predict-only by default (hyperparameters frozen from validation, so the run is C
 solves only). `imate` is still required just to build the gp2Scale GP (above);
 `--train` additionally exercises its log-determinant.
 
-Outputs `cache/preds_200k.npz` (`y_true`, `y_pred` residual, `var`, `r2`, `rmse`).
-Recover physical energy as `y_pred + mean.predict(...)` using the saved
-`cache/mean_model_200000.npz`.
+Outputs:
+- `cache/preds_200k.npz` — `y_true`, `y_pred` (residual), `var`, `r2`, `rmse`,
+  frozen `signal_var`/`cutoff`/`dim`/`min_count`/`depth`/`pls`/`cutoff_pct`, and
+  `category_order` (the sort permutation).
+- `cache/preds_200k_parity.png` — parity plot (pred vs true), points coloured by
+  posterior std.
+- `cache/mean_model_200000.npz`, `cache/y_residual_200000.npy` — recover physical
+  energy as `E_total = y_pred + mean.predict(...)`.
+- stdout — R²/RMSE vs baseline, realized sparsity/cutoff diagnostics, WL OOV rate
+  and per-depth vocab sizes, and timings.
 
 ## Notes
 - **One gp2Scale GP per dask client.** fvgp 4.8.3 forbids two live gp2Scale GPs on

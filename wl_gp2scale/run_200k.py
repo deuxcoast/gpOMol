@@ -22,9 +22,31 @@ import time
 import numpy as np
 
 
+def plot_parity(y_true, y_pred, std, out_path, r2, rmse, n_train):
+    """Parity plot (pred vs true residual), points coloured by GP posterior std."""
+    import matplotlib
+    matplotlib.use("Agg")  # headless (Perlmutter compute node)
+    import matplotlib.pyplot as plt
+
+    lo = float(min(y_true.min(), y_pred.min()))
+    hi = float(max(y_true.max(), y_pred.max()))
+    with plt.style.context("fivethirtyeight"):
+        fig, ax = plt.subplots(figsize=(7, 7))
+        sc = ax.scatter(y_true, y_pred, c=std, s=8, cmap="viridis", alpha=0.6)
+        ax.plot([lo, hi], [lo, hi], "k--", lw=1.5, label="y = x")
+        cb = fig.colorbar(sc, ax=ax); cb.set_label("posterior std")
+        ax.set_xlabel("true residual  y = E − m(x)")
+        ax.set_ylabel("predicted residual")
+        ax.set_title(f"wl_gp2scale parity — N_train={n_train:,}\n"
+                     f"R²={r2:.4f}  RMSE={rmse:.4f}")
+        ax.legend(loc="upper left", fontsize=10)
+        fig.tight_layout(); fig.savefig(out_path, dpi=140); plt.close(fig)
+    return out_path
+
+
 def build_argparser():
     ap = argparse.ArgumentParser(description="wl_gp2scale 200k distributed GP run")
-    ap.add_argument("--src", default="../train_4M")
+    ap.add_argument("--src", default="train_4M")
     ap.add_argument("--n", type=int, default=200_000)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--test-size", type=float, default=0.02)
@@ -32,7 +54,10 @@ def build_argparser():
     ap.add_argument("--depth", type=int, default=3)
     ap.add_argument("--pls", type=int, default=10)
     ap.add_argument("--cutoff-pct", type=float, default=25.0)
-    ap.add_argument("--vocab-sample", type=int, default=20_000)
+    ap.add_argument("--vocab-sample", type=int, default=0,
+                    help="0 = fit WL vocab on ALL train molecules (recommended: no "
+                         "train OOV, no dropped signal). >0 caps it to a stratified "
+                         "sample of that many molecules if memory/time bites.")
     ap.add_argument("--chunk", type=int, default=500, help="molecules per WL task")
     ap.add_argument("--batch-size", type=int, default=10_000, help="gp2Scale block")
     ap.add_argument("--backend", default="wendland32",
@@ -115,9 +140,14 @@ def main():
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     np.savez(
         args.out, y_true=y_te, y_pred=E_pred_resid, var=v, cutoff=cutoff,
-        r2=r2, rmse=rmse,
+        r2=r2, rmse=rmse, signal_var=float(args.signal_var or np.var(y_tr)),
+        dim=dim, min_count=args.min_count, depth=args.depth, pls=args.pls,
+        cutoff_pct=args.cutoff_pct, category_order=order,
     )
-    print(f"[run] saved predictions -> {args.out}  (elapsed {time.time()-t0:.0f}s)")
+    plot_path = os.path.splitext(args.out)[0] + "_parity.png"
+    plot_parity(y_te, m, np.sqrt(v), plot_path, r2, rmse, len(y_tr))
+    print(f"[run] saved predictions -> {args.out}")
+    print(f"[run] saved parity plot -> {plot_path}  (elapsed {time.time()-t0:.0f}s)")
     client.close()
 
 

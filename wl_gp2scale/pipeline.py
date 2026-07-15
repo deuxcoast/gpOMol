@@ -34,7 +34,7 @@ class WLGPPipeline:
     min_count: int = 5
     pls_components: int = 10
     cutoff_percentile: float = 25.0
-    vocab_sample: int = 20_000
+    vocab_sample: int = 0  # 0 = fit vocab on ALL train (no OOV); >0 = stratified cap
     cutoff_mult: float = 1.2
     # fitted state
     featurizer: SparseWLFeaturizer = field(default=None, repr=False)
@@ -43,13 +43,28 @@ class WLGPPipeline:
     dim_: int = None
 
     def fit(self, atoms, y, data_id, client=None, chunk=500):
-        """Fit vocab (on a stratified sample) + supervised PLS on TRAIN, recalibrate
-        cutoff. Returns the train embedding Z (N, pls_components) to avoid recompute."""
-        sidx = stratified_sample_indices(np.asarray(data_id), self.vocab_sample)
-        print(f"[pipe] fitting WL vocab on {len(sidx):,} stratified sample molecules")
+        """Fit vocab + supervised PLS on TRAIN, recalibrate cutoff. Returns the train
+        embedding Z (N, pls_components) to avoid recompute.
+
+        Vocabulary scope: fitting on a subsample leaves train labels out-of-vocabulary
+        (they get DROPPED), which throws away signal -- descriptor_eval/gp_parity.py
+        fits on all of train and so has 0% train OOV. We therefore use ALL training
+        molecules unless vocab_sample is smaller than the train set, and warn when a
+        subsample is actually in force."""
+        if self.vocab_sample and self.vocab_sample < len(atoms):
+            sidx = stratified_sample_indices(np.asarray(data_id), self.vocab_sample)
+            fit_atoms = [atoms[i] for i in sidx]
+            print(
+                f"[pipe] fitting WL vocab on {len(sidx):,} stratified sample molecules "
+                f"of {len(atoms):,} train -> expect NONZERO train OOV (dropped signal). "
+                f"Raise vocab_sample to >= n_train for parity with gp_parity.py."
+            )
+        else:
+            fit_atoms = atoms
+            print(f"[pipe] fitting WL vocab on ALL {len(atoms):,} training molecules")
         self.featurizer = SparseWLFeaturizer(
             depth=self.depth, min_count=self.min_count, cutoff_mult=self.cutoff_mult
-        ).fit([atoms[i] for i in sidx])
+        ).fit(fit_atoms)
 
         X_tr = self.featurizer.transform(atoms, client=client, chunk=chunk)
         self.reducer = SparsePLS(n_components=self.pls_components).fit(X_tr, y)

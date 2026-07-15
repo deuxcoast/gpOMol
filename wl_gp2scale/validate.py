@@ -29,13 +29,16 @@ from .reduce import SparsePLS, batch_pls_r2, regression_r2
 
 
 def sparse_vs_dense_parity(
-    Z_tr, y_tr, Z_te, cutoff, client, jitter=1e-6, tol=1e-3, device="cpu",
+    Z_tr, y_tr, Z_te, cutoff, client, y_te=None, jitter=1e-6, tol=1e-3, device="cpu",
     linalg_mode="sparseCG",
 ):
     """Compare gp2Scale/sparseCG posterior mean vs the dense scipy.cdist Wendland
     GP on the SAME embedding. Returns a dict with max abs diff and correlation.
-    All rows share one dummy category so masking is inert."""
+    If ``y_te`` is given, also reports each GP's R^2 against truth -- this is the
+    number to compare against descriptor_eval/gp_parity.py (~0.09-0.12). All rows
+    share one dummy category so masking is inert."""
     from gpcam import GPOptimizer
+    from sklearn.metrics import r2_score
 
     dim = Z_tr.shape[1]
     sv = float(np.var(y_tr))
@@ -71,7 +74,16 @@ def sparse_vs_dense_parity(
         f"[val] parity: max|Δ|={diff:.3e} (rel {diff/scale:.1e}), corr={corr:.6f} "
         f"[{linalg_mode}] -> {'PASS' if ok else 'FAIL'}"
     )
-    return {"max_abs_diff": diff, "rel_diff": diff / scale, "corr": corr, "pass": ok}
+    out = {"max_abs_diff": diff, "rel_diff": diff / scale, "corr": corr, "pass": ok}
+    if y_te is not None:
+        r2_sp = float(r2_score(y_te, m_sparse))
+        r2_de = float(r2_score(y_te, m_dense))
+        print(
+            f"[val] predictive R² vs truth: sparse={r2_sp:.4f}  dense={r2_de:.4f}  "
+            f"(compare to descriptor_eval/gp_parity.py ~0.09-0.12)"
+        )
+        out.update({"r2_sparse": r2_sp, "r2_dense": r2_de})
+    return out
 
 
 # ----------------------------- 2: sparsity / memory ------------------------
@@ -132,7 +144,7 @@ def main():
     from .pipeline import WLGPPipeline
 
     ap = argparse.ArgumentParser(description="wl_gp2scale pre-run validation")
-    ap.add_argument("--src", default="../train_4M")
+    ap.add_argument("--src", default="train_4M")
     ap.add_argument("--n", type=int, default=20_000)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--test-size", type=float, default=0.2)
@@ -142,7 +154,11 @@ def main():
     ap.add_argument("--cutoff-pct", type=float, default=25.0)
     ap.add_argument("--parity-n", type=int, default=3000, help="train rows for parity")
     ap.add_argument("--device", default="cpu", help="cpu (local) or cuda")
-    ap.add_argument("--workers", type=int, default=2, help="local dask workers")
+    ap.add_argument("--workers", type=int, default=2, help="dask workers")
+    ap.add_argument("--scheduler-file", default=None,
+                    help="connect to srun-launched GPU workers (proper per-task GPU "
+                         "binding) instead of a local cluster; e.g. "
+                         "$SCRATCH/scheduler_file_gpOmol.json")
     args = ap.parse_args()
 
     ds = get_data(src=args.src, n=args.n, seed=args.seed)
@@ -154,9 +170,13 @@ def main():
     y_tr, y_te = ds.y[tr], ds.y[te]
     cat_tr = ds.data_id[tr]
 
-    client = Client(n_workers=args.workers, threads_per_worker=1)
-    client.wait_for_workers(args.workers)
-    print(f"[val] local dask: {args.workers} workers")
+    if args.scheduler_file:
+        from .pipeline import connect_dask
+        client = connect_dask(args.scheduler_file, n_workers=args.workers)
+    else:
+        client = Client(n_workers=args.workers, threads_per_worker=1)
+        client.wait_for_workers(args.workers)
+        print(f"[val] local dask: {args.workers} workers")
 
     pipe = WLGPPipeline(
         depth=args.depth, min_count=args.min_count, pls_components=args.pls,
@@ -182,7 +202,7 @@ def main():
     k = min(args.parity_n, len(Z_tr))
     kt = min(args.parity_n // 3 or 1, len(Z_te))
     sparse_vs_dense_parity(
-        Z_tr[:k], y_tr[:k], Z_te[:kt], cutoff, client,
+        Z_tr[:k], y_tr[:k], Z_te[:kt], cutoff, client, y_te=y_te[:kt],
         device=args.device, linalg_mode="sparseCG",
     )
 
