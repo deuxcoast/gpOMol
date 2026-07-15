@@ -225,14 +225,40 @@ def release_gp(client):
         pass
 
 
-def predict(gp, X_te):
-    """Posterior mean and (non-negative) variance on the test embedding."""
-    m = _first(gp.posterior_mean(np.asarray(X_te, float)), ["f(x)", "m(x)"])
-    v = _first(
-        gp.posterior_covariance(np.asarray(X_te, float), variance_only=True),
-        ["v(x)", "S(x)", "variance"],
-    )
-    return m, np.maximum(v, 0.0)
+def predict(gp, X_te, batch=None, variance=True, verbose=False):
+    """Posterior mean and (optionally) variance on the test embedding, in batches.
+
+    Batching is not cosmetic at 200k. fvgp builds the cross-covariance
+    k = kernel(x_data, x_pred) DENSE (gp_posterior.py:185); at 196k train x 4k test
+    that is ~6.3 GB in one allocation. Batching bounds it to n_train x batch.
+
+    Cost asymmetry -- read this before choosing a test-set size:
+      * posterior_mean uses the PRECOMPUTED KVinvY (A = k.T @ KVinvY), so it costs
+        ONE solve in total no matter how many test points. Cheap once k is bounded.
+      * posterior_covariance calls KVsolve(k), i.e. ONE SOLVE PER TEST POINT against
+        the full N x N system. At N=196k that is hours-to-days for a few thousand
+        test points, and batching does NOT reduce the total work (only peak memory).
+
+    So at 200k: keep the variance test set small (hundreds), or pass variance=False
+    and take mean-only on the full test set.
+    """
+    X_te = np.asarray(X_te, float)
+    n = len(X_te)
+    bs = int(batch) if batch else n
+    ms, vs = [], []
+    for s in range(0, n, bs):
+        xb = X_te[s : s + bs]
+        ms.append(_first(gp.posterior_mean(xb), ["f(x)", "m(x)"]))
+        if variance:
+            vs.append(
+                _first(gp.posterior_covariance(xb, variance_only=True),
+                       ["v(x)", "S(x)", "variance"])
+            )
+        if verbose:
+            print(f"[predict]   {min(s + bs, n)}/{n}")
+    m = np.concatenate(ms)
+    v = np.maximum(np.concatenate(vs), 0.0) if variance else np.full(n, np.nan)
+    return m, v
 
 
 def train_hyperparameters(gp, hp_bounds, max_iter=50, info=True):
