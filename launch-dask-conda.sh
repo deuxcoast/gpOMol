@@ -31,6 +31,21 @@ set -u
 
 number_of_workers=${1:?usage: launch-dask-conda.sh <number_of_workers>  (match salloc -n)}
 ENV_BIN="${ENV_BIN:-$HOME/.conda/envs/gpomol/bin}"
+scheduler_file=$SCRATCH/scheduler_file_gpOmol.json
+
+# Refuse a second concurrent launch, BEFORE the slow import check so it fails fast.
+# Running this twice is self-destroying and the symptoms are baffling: the second
+# run's `rm -f` deletes the live scheduler file, its scheduler fights the first for
+# the port, and its srun blocks forever because the first srun already holds every
+# task in the allocation.
+if pgrep -u "$USER" -f "dask scheduler" > /dev/null 2>&1; then
+    echo "ERROR: a 'dask scheduler' is already running for $USER" >&2
+    echo "       pids: $(pgrep -u "$USER" -f 'dask scheduler' | tr '\n' ' ')" >&2
+    echo "       Refusing to start a second cluster. To reset:" >&2
+    echo "         pkill -u $USER -f 'dask scheduler'; pkill -u $USER -f 'dask worker'" >&2
+    echo "         pkill -u $USER -f 'srun.*dask'; rm -f $scheduler_file" >&2
+    exit 1
+fi
 
 if [ ! -x "$ENV_BIN/python" ]; then
     echo "ERROR: no python at $ENV_BIN. Set ENV_BIN=/path/to/your/env/bin" >&2
@@ -56,7 +71,6 @@ export DASK_DISTRIBUTED__COMM__TIMEOUTS__TCP=3600s
 export DASK_DISTRIBUTED__SCHEDULER__WORK_STEALING=False
 export DASK_DISTRIBUTED__SCHEDULER__WORKER_SATURATION=1
 
-scheduler_file=$SCRATCH/scheduler_file_gpOmol.json
 rm -f "$scheduler_file"
 
 echo "starting scheduler -> $scheduler_file"
