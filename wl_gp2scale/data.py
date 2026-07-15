@@ -102,7 +102,7 @@ def _encode_categories(raw_ids):
 
 
 def get_data(
-    src: str = "../train_4M",
+    src: str = "train_4M",
     n: int = 200_000,
     seed: int = 0,
     charge_key: str = "lowdin_charges",
