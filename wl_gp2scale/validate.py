@@ -39,10 +39,23 @@ def sparse_vs_dense_parity(
     number to compare against descriptor_eval/gp_parity.py (~0.09-0.12). All rows
     share one dummy category so masking is inert."""
     from gpcam import GPOptimizer
+    from scipy.spatial.distance import cdist
     from sklearn.metrics import r2_score
 
     dim = Z_tr.shape[1]
     sv = float(np.var(y_tr))
+
+    # Report the neighbour count THIS GP actually sees. It trains on len(Z_tr) rows
+    # (the parity slice), NOT on the full train split, so the regime here is
+    # density*len(Z_tr) -- much smaller than density*N_train. Comparing R² across
+    # runs is only meaningful when THIS number matches; a cutoff percentile chosen
+    # to preserve the neighbour count at the full N will silently starve the slice.
+    _nb = (cdist(Z_tr, Z_tr) < cutoff).sum(axis=1) - 1
+    print(
+        f"[val] parity GP trains on {len(Z_tr):,} rows and sees "
+        f"median={np.median(_nb):.0f} in-support neighbours/point "
+        f"(mean={_nb.mean():.0f}). Compare R² across runs ONLY at a matching value."
+    )
 
     # dense reference (descriptor_eval path): dense kernel, no gp2Scale
     def dense_ref(x1, x2, hps):
