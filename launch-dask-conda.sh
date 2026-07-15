@@ -55,14 +55,28 @@ fi
 # shadow the env, which is the trap in launch-dask-moduleGPU.sh.
 export PATH="$ENV_BIN:$PATH"
 
-# Fail fast rather than let workers register and then die on unpickling the kernel.
-python -c "import torch, gpcam, imate, dask, wl_gp2scale" || {
-    echo "ERROR: $ENV_BIN/python cannot import torch/gpcam/imate/dask/wl_gp2scale." >&2
-    echo "       (wl_gp2scale is imported from the CWD -- run this from the repo root.)" >&2
+# The repo is not pip-installed, so `wl_gp2scale` is only importable via the CWD --
+# and that does NOT reach the cluster. `dask scheduler`/`dask worker` are installed
+# console scripts: their sys.path[0] is the env's bin/, not this directory. The
+# scheduler must import wl_gp2scale to deserialize the task graph, so without this
+# it dies with "ModuleNotFoundError: No module named 'wl_gp2scale'". PYTHONPATH is
+# inherited by the backgrounded scheduler and by srun (--export=ALL), so it fixes
+# both. (A local Client() never hit this: its workers inherit the parent's sys.path.)
+export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
+
+# Check imports the way the SCHEDULER and WORKERS will see them: from a neutral cwd,
+# so only PYTHONPATH can supply wl_gp2scale. Running `python -c` from the repo root
+# would pass via the implicit cwd entry on sys.path and hide a broken PYTHONPATH --
+# a false pass that is exactly how the scheduler's ModuleNotFoundError got through.
+( cd / && python -c "import torch, gpcam, imate, dask, wl_gp2scale" ) || {
+    echo "ERROR: $ENV_BIN/python cannot import torch/gpcam/imate/dask/wl_gp2scale" >&2
+    echo "       with PYTHONPATH=$PYTHONPATH" >&2
+    echo "       (run this from the repo root so wl_gp2scale is on PYTHONPATH)" >&2
     exit 1
 }
-echo "python : $(which python)"
-echo "dask   : $(which dask)"
+echo "python     : $(which python)"
+echo "dask       : $(which dask)"
+echo "PYTHONPATH : $PYTHONPATH"
 
 export slurm_cpu_bind="cores"
 export MALLOC_TRIM_THRESHOLD_=0
