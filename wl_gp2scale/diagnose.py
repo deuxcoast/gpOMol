@@ -63,8 +63,9 @@ import numpy as np
 
 
 def build_argparser():
-    ap = argparse.ArgumentParser(description="gp2Scale diagnostics: bisect / cutoff sweep")
-    ap.add_argument("--mode", choices=["bisect", "sweep"], default="bisect")
+    ap = argparse.ArgumentParser(
+        description="gp2Scale diagnostics: bisect / cutoff sweep / informative radius")
+    ap.add_argument("--mode", choices=["bisect", "sweep", "radius"], default="bisect")
     ap.add_argument("--src", default="train_4M")
     ap.add_argument("--n", type=int, default=6000, help="molecules to load")
     ap.add_argument("--seed", type=int, default=0)
@@ -88,6 +89,12 @@ def build_argparser():
                     help="sweep mode: training-set size to project memory to")
     ap.add_argument("--cond", action="store_true",
                     help="sweep mode: also report cond(KV) (eigvalsh, slow)")
+    # radius-only
+    ap.add_argument("--nbins", type=int, default=10,
+                    help="radius mode: nn-distance bins (deciles by default)")
+    ap.add_argument("--nn-sizes", default="",
+                    help="radius mode: comma-separated train sizes for the nn-distance "
+                         "scaling fit; default is a log ladder up to the full split")
     return ap
 
 
@@ -109,9 +116,13 @@ def _load_embedding(args):
 
     ntr = min(args.ntr, len(Z_tr))
     nte = min(args.nte, len(Z_te))
+    # Keep the FULL train split too: the GP fits are capped by dense Cholesky, but
+    # the nearest-neighbour analysis is only a cdist and should use every training
+    # molecule available (it is the density that is under study).
     return {
         "Z_tr": Z_tr[:ntr], "y_tr": ds.y[tr][:ntr], "cat_tr": ds.data_id[tr][:ntr],
         "Z_te": Z_te[:nte], "y_te": ds.y[te][:nte], "cat_te": ds.data_id[te][:nte],
+        "Z_tr_full": Z_tr, "y_tr_full": ds.y[tr], "cat_tr_full": ds.data_id[tr],
         "dim": pipe.dim_, "cutoff": pipe.cutoff_, "ntr": ntr, "nte": nte,
     }
 
@@ -191,6 +202,133 @@ def run_sweep(args, E):
     print(f"    constraint, and it is why pct=25 does not survive the jump to 200k.")
     print(f"  * R² is at ntr={ntr}: compare pct values RELATIVELY, do not read it as")
     print(f"    the 200k R² (more training data raises it).")
+
+
+# --------------------------------------------------------------- radius mode
+
+
+def run_radius(args, E):
+    """Informative radius + a density-only prediction of R^2 at --target-n."""
+    from scipy.linalg import cho_factor, cho_solve
+    from scipy.spatial.distance import cdist, pdist
+    from scipy.stats import percentileofscore
+    from sklearn.metrics import r2_score
+
+    from .kernel import make_wl_block_kernel
+    from .pipeline import with_category_tag
+    from .radius import (frac_within, nn_scaling_exponent, predict_r2_at_n,
+                         rmse_vs_nn_distance)
+
+    Z_tr, y_tr, Z_te, y_te = E["Z_tr"], E["y_tr"], E["Z_te"], E["y_te"]
+    Z_tr_full = E["Z_tr_full"]
+    dim, ntr, cut = E["dim"], E["ntr"], E["cutoff"]
+    sv = float(np.var(y_tr))
+    tn = args.target_n
+
+    # 1. fit the GP (dense Cholesky) and predict, to measure RMSE vs nn-distance
+    kern = make_wl_block_kernel(cut, dim=dim, use_category_tag=True,
+                                device=args.device, dtype="float64")
+    Xtr = with_category_tag(Z_tr, E["cat_tr"])
+    Xte = with_category_tag(Z_te, E["cat_te"])
+    hps = np.array([sv])
+    K = np.asarray(kern(Xtr, Xtr, hps)) + args.jitter * np.eye(ntr)
+    alpha = cho_solve(cho_factor(K), y_tr)
+    y_pred = np.asarray(kern(Xte, Xtr, hps)) @ alpha
+    r2_now = r2_score(y_te, y_pred)
+
+    nn_now = cdist(Z_te, Z_tr).min(axis=1)
+    curve = rmse_vs_nn_distance(nn_now, y_te, y_pred, n_bins=args.nbins)
+    base = curve["baseline"]
+
+    print(f"\n[radius] ntr={ntr} nte={E['nte']} dim={dim} cutoff={cut:.5f} "
+          f"signal_var={sv:.3f}  measured R²={r2_now:+.4f}")
+    print(f"[radius] baseline RMSE (predict the mean) = {base:.3f}\n")
+    hdr = f"{'bin':>4}{'%test':>7}{'med nn-dist':>13}{'RMSE':>9}{'RMSE/base':>11}  informative?"
+    print(hdr); print("-" * (len(hdr) + 4))
+    for i, (d, r, f) in enumerate(zip(curve["bin_median_nn"], curve["bin_rmse"],
+                                      curve["bin_frac"])):
+        ratio = r / base
+        flag = "yes" if ratio < 0.9 else ("~" if ratio < 1.0 else "NO (>= mean)")
+        print(f"{i:>4}{100*f:>6.0f}%{d:>13.5f}{r:>9.3f}{ratio:>11.2f}  {flag}")
+
+    n_good = int((curve["bin_rmse"] < base).sum())
+    print(f"\n[radius] {n_good}/{len(curve['bin_rmse'])} bins beat the baseline. "
+          f"Per-bin RMSE is noisy (each bin is only nte/{args.nbins} points), so the "
+          f"radius below comes from the CUMULATIVE curve:")
+    print(f"{'nn-dist <=':>12}{'% test':>8}{'cum RMSE':>10}{'/base':>8}")
+    for d, c in zip(curve["cum_nn"], curve["cum_rmse"]):
+        pc = 100 * float(np.mean(nn_now <= d))
+        print(f"{d:>12.5f}{pc:>7.0f}%{c:>10.3f}{c/base:>8.2f}")
+
+    R_inf = curve["radius"]
+    if R_inf is None:
+        print("\n[radius] Even the nearest test points do not beat 0.9*baseline -> the")
+        print("[radius] error is flat in neighbour distance. That is REPRESENTATIONAL,")
+        print("[radius] not a density problem: more molecules will not help, and 200k")
+        print("[radius] is not justified on this evidence. (If R² here is also ~0 or")
+        print("[radius] negative, first check the embedding is not simply too weak at")
+        print("[radius] this --n; rerun at --n 20000 before concluding anything.)")
+        return
+
+    # 2. express the radius as a percentile -- the scale-free, transferable form
+    dp = pdist(Z_tr[: min(2500, ntr)])
+    pct_inf = float(percentileofscore(dp, R_inf))
+    pct_2inf = float(percentileofscore(dp, 2.0 * R_inf))
+    inside = frac_within(nn_now, R_inf)
+    print(f"\n[radius] informative radius R_inf = {R_inf:.5f} (embedding units)")
+    print(f"[radius]   = the {pct_inf:.3f}th percentile of pairwise distances "
+          f"(percentile is the scale-free, transferable form)")
+    print(f"[radius]   {100*inside:.1f}% of test molecules are inside it at ntr={ntr:,}; "
+          f"the other {100*(1-inside):.1f}% are predicted WORSE than the mean.")
+    # Do NOT set cutoff = R_inf. The Wendland tapers INSIDE the cutoff -- psi(0.5)
+    # = 0.19, psi(0.75) = 0.04 -- so with cutoff = R_inf a neighbour sitting at
+    # R_inf gets exactly zero weight and one at R_inf/2 only 19%, i.e. we would be
+    # discarding neighbours that demonstrably carry signal. Setting cutoff = 2*R_inf
+    # puts psi=0.19 at R_inf and ~0 beyond it: full weight on the near neighbours,
+    # meaningful weight out to the edge of the informative zone, negligible past it.
+    print(f"\n[radius]   -> --cutoff-pct {pct_2inf:.2f}   (cutoff = 2*R_inf = "
+          f"{2*R_inf:.5f})")
+    print(f"[radius]      The Wendland tapers inside the cutoff (psi(0.5)=0.19), so")
+    print(f"[radius]      cutoff=R_inf (pct {pct_inf:.2f}) would zero out neighbours that")
+    print(f"[radius]      still carry signal. 2*R_inf places psi=0.19 exactly at R_inf.")
+
+    # 3. how fast does nn-distance shrink as the train set grows? (embedding FIXED,
+    #    so this isolates density from any change in the representation)
+    if args.nn_sizes:
+        sizes = [int(s) for s in args.nn_sizes.split(",")]
+    else:
+        top = len(Z_tr_full)
+        sizes = sorted({int(top / (2 ** k)) for k in range(6)} | {top})
+        sizes = [s for s in sizes if s >= 250]
+    slope, d_eff, sizes, meds, nn_full = nn_scaling_exponent(Z_te, Z_tr_full, sizes)
+    print(f"\n[radius] nn-distance vs train size (embedding held fixed):")
+    print(f"{'n_train':>9}{'median nn':>12}{'% inside R_inf':>16}")
+    for n, m in zip(sizes, meds):
+        idx = np.random.default_rng(0).choice(len(Z_tr_full), size=n, replace=False)
+        f_in = frac_within(cdist(Z_te, Z_tr_full[idx]).min(axis=1), R_inf)
+        print(f"{n:>9,}{m:>12.5f}{100*f_in:>15.1f}%")
+    print(f"[radius] log-log slope = {slope:+.4f}  ->  nn ~ n^({slope:.3f}), "
+          f"effective dimension d_eff ~ {d_eff:.1f}")
+
+    # 4. project to the target N and predict R^2 from the density shift alone
+    print(f"\n[radius] projected to N_train={tn:,} (density effect ONLY, embedding fixed):")
+    print(f"{'n_train':>9}{'median nn':>12}{'% inside R_inf':>16}{'pred R²':>10}")
+    # ntr MUST be in this list: its row is the self-check (scale factor 1, so the
+    # prediction is just the measured data re-binned and should reproduce r2_now).
+    for n in sorted(set(list(sizes) + [ntr, tn])):
+        sc = (n / ntr) ** slope
+        nn_s = nn_now * sc
+        p = predict_r2_at_n(curve, nn_now, ntr, n, slope, y_te)
+        f_in = frac_within(nn_s, R_inf)
+        tag = "  <- measured" if n == ntr else ("  <- TARGET" if n == tn else "")
+        print(f"{n:>9,}{p['median_nn_scaled']:>12.5f}{100*f_in:>15.1f}%"
+              f"{p['pred_r2']:>+10.4f}{tag}")
+    print(f"\n[radius] sanity: predicted R² at n={ntr:,} should be close to the "
+          f"measured {r2_now:+.4f} (it is the same data, re-binned).")
+    print("[radius] This is a FLOOR: it holds the embedding fixed, so it counts only")
+    print("[radius] the density gain. The representation also improves with N (the PLS")
+    print("[radius] probe went -0.266 at 16k train to +0.1212 at 40k), which this")
+    print("[radius] estimate deliberately ignores.")
 
 
 # --------------------------------------------------------------- bisect mode
@@ -282,6 +420,8 @@ def main():
     E = _load_embedding(args)
     if args.mode == "sweep":
         run_sweep(args, E)
+    elif args.mode == "radius":
+        run_radius(args, E)
     else:
         run_bisect(args, E)
 
