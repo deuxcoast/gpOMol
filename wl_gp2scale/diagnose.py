@@ -398,7 +398,7 @@ def run_bisect(args, E):
         try:
             gp, _ = build_gp(Xtr, y_tr, cut, dim, client, signal_var=sv, jitter=jit,
                              batch_size=bs, backend="wendland32",
-                             compute_device=("gpu" if args.device == "cuda" else "cpu"),
+                             compute_device="cpu",  # see pipeline.build_gp
                              device=args.device, linalg_mode=mode)
             m, _v = predict(gp, Xte)
             row(f"{label} (nb={ntr // bs})", m, m_ref)
