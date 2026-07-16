@@ -5,19 +5,8 @@
 The environment in use is a **conda** env named `gpomol` (python 3.11), at
 `~/.conda/envs/gpomol`.
 
-An earlier version of this file documented a **venv** flow:
-
 ```bash
-python -m venv gpomol
-gpomol source/bin/activate        # also malformed; should be `source gpomol/bin/activate`
-```
-
-No such venv exists on this system, and that mismatch has cost real debugging time:
-`launch-dask-moduleGPU.sh` still sources `./gpomol/bin/activate` and silently
-continues when it fails (see [Running](#running-gpu)). If you ever do standardise on
-a venv, fix the launch scripts at the same time.
-
-```bash
+module load python/3.11-24.1.0
 conda activate gpomol
 pip install -r requirements.txt
 pip install imate                 # REQUIRED for gp2Scale; NOT in requirements.txt
