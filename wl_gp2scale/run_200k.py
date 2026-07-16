@@ -101,6 +101,11 @@ def build_argparser():
                          "predict-only never READS it -- so pay the floor (loose rtol "
                          "-> min_num_samples=10). Forced to 0.01 under --train, which "
                          "actually uses it.")
+    ap.add_argument("--keep-logdet", action="store_true",
+                    help="compute the log-determinant even predict-only. Off by "
+                         "default: predict-only never reads it, so it is ~200 serial "
+                         "matvecs on the driver against the full sparse KV, discarded. "
+                         "Always computed under --train (which does read it).")
     ap.add_argument("--train", action="store_true",
                     help="marginal-likelihood training (needs imate)")
     ap.add_argument("--out", default="cache/preds_200k.npz")
@@ -164,6 +169,7 @@ def main():
         compute_device=args.compute_device,
         device=args.device,
         logdet_rtol=(0.01 if args.train else args.logdet_rtol),
+        skip_logdet=(not args.train and not args.keep_logdet),
     )
     print(f"[run] GP constructed in {time.time()-t_gp:.0f}s "
           f"(kernel assembly + logdet + KVinvY solve)")
