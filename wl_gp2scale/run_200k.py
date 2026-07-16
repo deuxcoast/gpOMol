@@ -2,15 +2,22 @@
 run_200k.py  (wl_gp2scale)
 ==========================
 Full-scale driver: 200k molecules, 16 GPUs (4 Perlmutter nodes), gp2Scale +
-sparseCG. Connects to the Dask scheduler file written by launch-dask-moduleGPU.sh.
+sparseCG. Connects to the Dask scheduler file written by launch-dask-conda.sh.
 
 Usage (inside the allocation, after launching Dask)::
 
-    python -m wl_gp2scale.run_200k --n 200000 --workers 16
+    python -m wl_gp2scale.run_200k --n 200000 --workers 16 --min-count 2 --no-variance
 
-Default flow is PREDICT-ONLY with hyperparameters frozen from the validation-scale
-fit (posterior mean/variance need only CG solves, no log-determinant). Pass
---train only if `imate` is installed and validated (see pipeline.train_hyperparameters).
+Default flow is PREDICT-ONLY: nothing is trained, signal_var = var(y_train) and the
+cutoff are both set analytically, and --train (marginal-likelihood optimisation) is
+off.
+
+NOTE: predict-only does NOT avoid the log-determinant. fvgp computes it inside the
+GP CONSTRUCTOR -- GPkv.__init__ -> _refresh -> `self.logdet_KV = self.logdet()`
+(gp_kv.py:62,216) -- so every gp2Scale GP pays for one imate stochastic-Lanczos
+logdet no matter what, and at 200k that is a real cost, not a rounding error. It is
+also why `imate` is needed just to instantiate the GP. --train only adds MORE of
+them (one per likelihood evaluation).
 """
 
 from __future__ import annotations
@@ -73,7 +80,13 @@ def build_argparser():
     ap.add_argument("--scheduler-file", default=None,
                     help="default $SCRATCH/scheduler_file_gpOmol.json")
     ap.add_argument("--workers", type=int, default=16)
-    ap.add_argument("--device", default="cuda")
+    ap.add_argument("--device", default="cuda",
+                    help="OUR kernel's torch device (this is what uses the GPU)")
+    ap.add_argument("--compute-device", default="cpu", choices=["cpu", "gpu"],
+                    help="fvgp's device. Keep 'cpu': 'gpu' routes imate's logdet to a "
+                         "CUDA backend that a pip-installed imate does not have, and "
+                         "fvgp gates it on TORCH having CUDA, not imate. Costs nothing "
+                         "-- the kernel still runs on --device.")
     ap.add_argument("--predict-batch", type=int, default=500,
                     help="test points per prediction batch; bounds the DENSE "
                          "cross-covariance k (n_train x batch)")
@@ -130,7 +143,7 @@ def main():
         X_tr, y_tr, cutoff, dim, client,
         signal_var=args.signal_var, jitter=args.jitter, batch_size=args.batch_size,
         backend=args.backend, linalg_mode=args.linalg,
-        compute_device=("gpu" if args.device == "cuda" else "cpu"),
+        compute_device=args.compute_device,
         device=args.device,
     )
 

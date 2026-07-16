@@ -162,18 +162,34 @@ def build_gp(
     batch_size=10_000,
     backend="wendland32",
     linalg_mode="sparseCG",
-    compute_device="gpu",
+    compute_device="cpu",
     device=None,
     dtype="float64",
     cutoff_is_hp=False,
 ):
     """Construct the gp2Scale GPOptimizer with the sparse GPU block kernel.
 
+    compute_device vs device -- these are DIFFERENT knobs, keep them apart:
+      * `device` is OUR kernel's torch device. Set it to "cuda" to build the blocks
+        on the GPU. This is where the GPU actually earns its keep.
+      * `compute_device` is fvgp's. It selects fvgp's own linear algebra (dense torch
+        paths we never touch, since we are sparse) and -- the trap -- whether imate
+        runs its logdet on the GPU:
+            gpu = compute_device == "gpu" and _imate_gpu_enabled(args)   # gp_lin_alg.py:1027
+        `_imate_gpu_enabled` checks whether TORCH/cupy have CUDA, NOT whether imate
+        was built with it. A pip-installed imate has no CUDA support, so on a GPU node
+        compute_device="gpu" green-lights a backend that then dies with
+            ImportError: This package has not been compiled with GPU support
+        Hence the default "cpu": it costs nothing (the kernel still runs on `device`,
+        and the sparse solve is scipy/CPU regardless) and avoids the broken path.
+        Only pass "gpu" if imate was rebuilt with USE_CUDA=1.
+
     dtype defaults to float64 on purpose: this Gram is near-singular (cond ~1e9),
     so float32 kernel error amplifies into a wrong solve. An earlier version of this
     function did not forward dtype at all, silently running the kernel in float32
     while the dense reference ran float64 -- that alone moved R^2 from 0.049 to 0.027.
     """
+
     require_imate()
     from gpcam import GPOptimizer
 

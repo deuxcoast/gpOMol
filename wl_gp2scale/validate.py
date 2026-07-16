@@ -75,7 +75,7 @@ def sparse_vs_dense_parity(
     Xte = with_category_tag(Z_te, np.zeros(len(Z_te)))
     gp_sparse, _ = build_gp(
         Xtr, y_tr, cutoff, dim, client, signal_var=sv, jitter=jitter,
-        batch_size=10_000, compute_device=device, device=device,
+        batch_size=10_000, compute_device="cpu", device=device,
         linalg_mode=linalg_mode,
     )
     m_sparse, _ = predict(gp_sparse, Xte)
