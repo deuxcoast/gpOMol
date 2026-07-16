@@ -98,7 +98,8 @@ def sort_by_category(Z_tagged, y):
 # ----------------------------- Dask connection -----------------------------
 
 
-def connect_dask(scheduler_file=None, n_workers=16, poll_timeout=1800):
+def connect_dask(scheduler_file=None, n_workers=16, poll_timeout=1800,
+                 worker_timeout=300):
     """Connect to the Perlmutter scheduler file (poll until it appears) or start a
     local Client(). Waits for n_workers before returning."""
     from distributed import Client
@@ -120,7 +121,21 @@ def connect_dask(scheduler_file=None, n_workers=16, poll_timeout=1800):
         print("[dask] started a local cluster (no scheduler file)")
     if n_workers:
         print(f"[dask] waiting for {n_workers} workers ...")
-        client.wait_for_workers(n_workers)
+        # Bounded wait. client.wait_for_workers() defaults to timeout=None, i.e. it
+        # blocks FOREVER if the cluster was launched with fewer workers than asked
+        # for -- which silently burns the allocation (4 GPU nodes) while looking busy.
+        # The common cause is a mismatch: `./launch-dask-conda.sh 4` against
+        # `--workers 16`. Fail in seconds with the actual counts instead.
+        try:
+            client.wait_for_workers(n_workers, timeout=worker_timeout)
+        except Exception:
+            have = len(client.nthreads())
+            raise RuntimeError(
+                f"only {have} of {n_workers} workers registered after "
+                f"{worker_timeout}s. The cluster's worker count must match: "
+                f"`./launch-dask-conda.sh {n_workers}` (and salloc -n {n_workers}) "
+                f"vs --workers {n_workers}. Currently {have} are up."
+            ) from None
     # client.nthreads() is a live RPC to the scheduler. client.scheduler_info() reads
     # a CACHED identity that can lag right after wait_for_workers returns -- it once
     # reported "5 workers ready" on a healthy 16-worker cluster (the scheduler log
