@@ -114,7 +114,26 @@ def connect_dask(scheduler_file=None, n_workers=16, poll_timeout=1800,
             if time.time() - t0 > poll_timeout:
                 raise TimeoutError(f"scheduler file never appeared: {scheduler_file}")
             time.sleep(2)
-        client = Client(scheduler_file=scheduler_file)
+        # The scheduler file lives in $SCRATCH and PERSISTS across allocations. If it
+        # is left over from a previous allocation, its address points at a node that
+        # is gone, and Client() dies with a 30s timeout + a deep tornado traceback.
+        # Catch that and say what actually happened.
+        try:
+            client = Client(scheduler_file=scheduler_file)
+        except (OSError, TimeoutError) as e:
+            try:
+                import json
+                addr = json.load(open(scheduler_file)).get("address", "?")
+            except Exception:
+                addr = "?"
+            raise RuntimeError(
+                f"could not reach the Dask scheduler at {addr} (from {scheduler_file}). "
+                f"This scheduler_file is almost certainly STALE -- left from a previous "
+                f"allocation whose scheduler no longer exists. In THIS allocation, "
+                f"(re)launch the cluster first: `./launch-dask-conda.sh {n_workers}` "
+                f"(it rm's the stale file and writes a fresh one), wait for the workers "
+                f"to register, then rerun."
+            ) from None
         print(f"[dask] connected via {scheduler_file}")
     else:
         client = Client()
