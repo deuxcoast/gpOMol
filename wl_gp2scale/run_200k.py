@@ -95,6 +95,12 @@ def build_argparser():
                          "POINT on the full NxN system -- at 200k that is the "
                          "dominant cost. Use with a large test set; keep the test "
                          "set in the hundreds if you want variance.")
+    ap.add_argument("--logdet-rtol", type=float, default=0.5,
+                    help="imate SLQ error_rtol for the log-determinant. fvgp computes "
+                         "the logdet in the GP CONSTRUCTOR no matter what, but "
+                         "predict-only never READS it -- so pay the floor (loose rtol "
+                         "-> min_num_samples=10). Forced to 0.01 under --train, which "
+                         "actually uses it.")
     ap.add_argument("--train", action="store_true",
                     help="marginal-likelihood training (needs imate)")
     ap.add_argument("--out", default="cache/preds_200k.npz")
@@ -105,6 +111,7 @@ def main():
     from sklearn.metrics import r2_score
     from sklearn.model_selection import train_test_split
 
+    from .cutoff import sparsity_report
     from .data import get_data
     from .pipeline import (
         WLGPPipeline, build_gp, connect_dask, predict, sort_by_category,
@@ -139,13 +146,27 @@ def main():
     X_te = with_category_tag(Z_te, cat_te)
     X_tr, y_tr, order = sort_by_category(X_tr, y_tr)
 
+    # Know the memory bill BEFORE paying it: fvgp gathers every COO component to the
+    # DRIVER and builds one scipy CSR there (gp_prior.py:294-306), so this number --
+    # not worker RAM -- is what can kill the run.
+    rep = sparsity_report(Z_tr, cutoff, dim=dim, data_id=cat_tr)
+    n_blocks = max(1, len(X_tr) // args.batch_size)
+    print(f"[run] gp2Scale: {n_blocks} batches -> ~{n_blocks*(n_blocks+1)//2} blocks "
+          f"over {args.workers} workers; driver-side CSR ~{rep['est_gb']:.1f} GB "
+          f"(assembly peak roughly 3x that)")
+
+    print("[run] building gp2Scale GP (this includes the unavoidable imate logdet) ...")
+    t_gp = time.time()
     gp, kern = build_gp(
         X_tr, y_tr, cutoff, dim, client,
         signal_var=args.signal_var, jitter=args.jitter, batch_size=args.batch_size,
         backend=args.backend, linalg_mode=args.linalg,
         compute_device=args.compute_device,
         device=args.device,
+        logdet_rtol=(0.01 if args.train else args.logdet_rtol),
     )
+    print(f"[run] GP constructed in {time.time()-t_gp:.0f}s "
+          f"(kernel assembly + logdet + KVinvY solve)")
 
     if args.train:
         sv0 = float(args.signal_var or np.var(y_tr))
