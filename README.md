@@ -35,14 +35,22 @@ forgot `conda activate gpomol` (your prompt should show `(gpomol)`).
 
 ## Running (GPU)
 
+The **same number** must appear in all three places — `salloc -n`, the launch
+script's argument, and `--workers`. A mismatch (e.g. launching 4 workers and asking
+for 16) makes the run block waiting for workers that will never arrive, silently
+burning the allocation. `connect_dask` now fails after `worker_timeout` naming both
+counts instead of hanging.
+
 ```bash
-./allocate_GPUs.sh 1 4                        # <nodes> <tasks=GPUs>, account m4055_g
-./launch-dask-conda.sh 4 > dask_launch.log 2>&1 &
-tail -f dask_launch.log                       # wait for "scheduler up; starting N workers"
-# Ctrl-C the tail (stops only the tail, not the cluster), then:
-python -m wl_gp2scale.validate --n 50000 --device cuda --workers 4 \
+N=4                                           # nodes*4 == tasks == GPUs == workers
+./allocate_GPUs.sh 1 $N                       # <nodes> <tasks=GPUs>, account m4055_g
+./launch-dask-conda.sh $N > dask_launch.log 2>&1 &
+grep -c "Register worker" dask_launch.log     # wait until this reaches $N
+python -m wl_gp2scale.validate --n 50000 --device cuda --workers $N \
     --min-count 2 --scheduler-file $SCRATCH/scheduler_file_gpOmol.json
 ```
+
+For the full run it is `N=16` with `./allocate_GPUs.sh 4 16` (4 nodes x 4 GPUs).
 
 Use `launch-dask-conda.sh`, **not** `launch-dask-moduleGPU.sh`. The latter sources
 the non-existent venv, does not `set -e`, and so continues with

@@ -98,7 +98,8 @@ def sort_by_category(Z_tagged, y):
 # ----------------------------- Dask connection -----------------------------
 
 
-def connect_dask(scheduler_file=None, n_workers=16, poll_timeout=1800):
+def connect_dask(scheduler_file=None, n_workers=16, poll_timeout=1800,
+                 worker_timeout=300):
     """Connect to the Perlmutter scheduler file (poll until it appears) or start a
     local Client(). Waits for n_workers before returning."""
     from distributed import Client
@@ -120,7 +121,21 @@ def connect_dask(scheduler_file=None, n_workers=16, poll_timeout=1800):
         print("[dask] started a local cluster (no scheduler file)")
     if n_workers:
         print(f"[dask] waiting for {n_workers} workers ...")
-        client.wait_for_workers(n_workers)
+        # Bounded wait. client.wait_for_workers() defaults to timeout=None, i.e. it
+        # blocks FOREVER if the cluster was launched with fewer workers than asked
+        # for -- which silently burns the allocation (4 GPU nodes) while looking busy.
+        # The common cause is a mismatch: `./launch-dask-conda.sh 4` against
+        # `--workers 16`. Fail in seconds with the actual counts instead.
+        try:
+            client.wait_for_workers(n_workers, timeout=worker_timeout)
+        except Exception:
+            have = len(client.nthreads())
+            raise RuntimeError(
+                f"only {have} of {n_workers} workers registered after "
+                f"{worker_timeout}s. The cluster's worker count must match: "
+                f"`./launch-dask-conda.sh {n_workers}` (and salloc -n {n_workers}) "
+                f"vs --workers {n_workers}. Currently {have} are up."
+            ) from None
     # client.nthreads() is a live RPC to the scheduler. client.scheduler_info() reads
     # a CACHED identity that can lag right after wait_for_workers returns -- it once
     # reported "5 workers ready" on a healthy 16-worker cluster (the scheduler log
@@ -173,6 +188,7 @@ def build_gp(
     dtype="float64",
     cutoff_is_hp=False,
     logdet_rtol=0.5,
+    skip_logdet=False,
     args=None,
 ):
     """Construct the gp2Scale GPOptimizer with the sparse GPU block kernel.
@@ -227,19 +243,38 @@ def build_gp(
     _args = dict(args or {})
     _args.setdefault("random_logdet_error_rtol", float(logdet_rtol))
 
-    gp = GPOptimizer(
-        x_data=np.asarray(X_tr, float),
-        y_data=np.asarray(y_tr, float),
-        init_hyperparameters=init_hps,
-        noise_variances=jitter * np.ones(len(y_tr)),
-        compute_device=compute_device,
-        kernel_function=kern,
-        gp2Scale=True,
-        gp2Scale_batch_size=batch_size,
-        dask_client=client,
-        linalg_mode=linalg_mode,
-        args=_args,
-    )
+    # skip_logdet: replace the log-determinant with 0.0 for a predict-only run.
+    # fvgp computes log|KV| in the constructor unconditionally (GPkv._refresh), but
+    # `logdet_KV` is READ only by gp_marginal_likelihood.py -- never on the predict
+    # path. So for a frozen-hyperparameter run it is pure, discarded work: ~200
+    # stochastic-Lanczos matvecs against the full 2e9-nnz sparse KV, single-threaded
+    # on the driver. Stub it out entirely (better than GPU-accelerating a number we
+    # throw away). MUST be off under --train, which does read it.
+    #
+    # gp_kv did `from .gp_lin_alg import *`, so the live reference is
+    # fvgp.gp_kv.calculate_random_logdet. Patch there, restore after construction
+    # (the only call is in the constructor; predict never recomputes the logdet).
+    import fvgp.gp_kv as _gpkv
+    _orig_logdet = _gpkv.calculate_random_logdet
+    if skip_logdet:
+        _gpkv.calculate_random_logdet = lambda KV, compute_device, args=None: 0.0
+        print("[gp] skip_logdet=True: stubbing the unread predict-only log-determinant")
+    try:
+        gp = GPOptimizer(
+            x_data=np.asarray(X_tr, float),
+            y_data=np.asarray(y_tr, float),
+            init_hyperparameters=init_hps,
+            noise_variances=jitter * np.ones(len(y_tr)),
+            compute_device=compute_device,
+            kernel_function=kern,
+            gp2Scale=True,
+            gp2Scale_batch_size=batch_size,
+            dask_client=client,
+            linalg_mode=linalg_mode,
+            args=_args,
+        )
+    finally:
+        _gpkv.calculate_random_logdet = _orig_logdet
     return gp, kern
 
 
