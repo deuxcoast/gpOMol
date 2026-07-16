@@ -26,6 +26,7 @@
 
 set -u
 N_WORKERS=16                       # must equal -n above
+N_MOL="${RUN_N:-200000}"           # override for a cheap test: RUN_N=20000 sbatch ...
 
 # --- environment (same lessons as launch-dask-conda.sh: PATH, not module load) ---
 ENV_BIN="${ENV_BIN:-$HOME/.conda/envs/gpomol/bin}"
@@ -65,9 +66,9 @@ workers_pid=$!
 # pct=25 = signal-optimal cutoff (the reason for the 8h job). --no-variance because
 # posterior variance is one solve PER test point. connect_dask waits for all 16.
 python -m wl_gp2scale.run_200k \
-    --n 200000 --min-count 2 --cutoff-pct 25 --test-size 0.02 \
+    --n "$N_MOL" --min-count 2 --cutoff-pct 25 --test-size 0.02 \
     --no-variance --workers "$N_WORKERS" --device cuda \
-    --scheduler-file "$sched" --out cache/preds_200k.npz
+    --scheduler-file "$sched" --out "cache/preds_${N_MOL}.npz"
 rc=$?
 
 echo "driver exited with code $rc; tearing down cluster"
