@@ -166,6 +166,8 @@ def build_gp(
     device=None,
     dtype="float64",
     cutoff_is_hp=False,
+    logdet_rtol=0.5,
+    args=None,
 ):
     """Construct the gp2Scale GPOptimizer with the sparse GPU block kernel.
 
@@ -204,6 +206,21 @@ def build_gp(
     )
     sv = float(signal_var) if signal_var is not None else float(np.var(y_tr))
     init_hps = np.array([sv, cutoff]) if cutoff_is_hp else np.array([sv])
+
+    # The log-determinant is UNAVOIDABLE but, predict-only, it is pure waste. fvgp
+    # computes it in the constructor (GPkv.__init__ -> _refresh -> logdet(),
+    # gp_kv.py:62,216) no matter what, yet `logdet_KV` is only ever READ by
+    # gp_marginal_likelihood.py -- i.e. only if you train. So for a predict-only run
+    # we pay imate's stochastic-Lanczos estimate and then throw the answer away.
+    #
+    # It is not cheap at scale: each SLQ sample costs `lanczos_degree` (20) matvecs
+    # against the full sparse KV, and the sample count is driven by error_rtol
+    # (default 0.01) up to max_num_samples=5000. Loosening error_rtol makes it stop
+    # at min_num_samples=10 -- the floor, ~200 matvecs -- which is all we should pay
+    # for a number we discard. Raise it (0.01) if you actually --train.
+    _args = dict(args or {})
+    _args.setdefault("random_logdet_error_rtol", float(logdet_rtol))
+
     gp = GPOptimizer(
         x_data=np.asarray(X_tr, float),
         y_data=np.asarray(y_tr, float),
@@ -215,6 +232,7 @@ def build_gp(
         gp2Scale_batch_size=batch_size,
         dask_client=client,
         linalg_mode=linalg_mode,
+        args=_args,
     )
     return gp, kern
 
