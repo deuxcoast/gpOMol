@@ -188,7 +188,6 @@ def build_gp(
     dtype="float64",
     cutoff_is_hp=False,
     logdet_rtol=0.5,
-    skip_logdet=False,
     args=None,
 ):
     """Construct the gp2Scale GPOptimizer with the sparse GPU block kernel.
@@ -229,52 +228,31 @@ def build_gp(
     sv = float(signal_var) if signal_var is not None else float(np.var(y_tr))
     init_hps = np.array([sv, cutoff]) if cutoff_is_hp else np.array([sv])
 
-    # The log-determinant is UNAVOIDABLE but, predict-only, it is pure waste. fvgp
-    # computes it in the constructor (GPkv.__init__ -> _refresh -> logdet(),
-    # gp_kv.py:62,216) no matter what, yet `logdet_KV` is only ever READ by
-    # gp_marginal_likelihood.py -- i.e. only if you train. So for a predict-only run
-    # we pay imate's stochastic-Lanczos estimate and then throw the answer away.
-    #
-    # It is not cheap at scale: each SLQ sample costs `lanczos_degree` (20) matvecs
-    # against the full sparse KV, and the sample count is driven by error_rtol
-    # (default 0.01) up to max_num_samples=5000. Loosening error_rtol makes it stop
-    # at min_num_samples=10 -- the floor, ~200 matvecs -- which is all we should pay
-    # for a number we discard. Raise it (0.01) if you actually --train.
+    # fvgp computes log|KV| in the constructor unconditionally (GPkv._refresh), but
+    # predict-only never READS it (only gp_marginal_likelihood.py does). Measured, it
+    # is a small part of the constructor -- ~9s of 167s at 20k, since the near-singular
+    # alpha CG solve dominates -- so we do NOT try to eliminate it (an earlier monkey-
+    # patch that stubbed it to 0.0 was removed: fragile, and not worth ~4% of wall
+    # time). We do keep it CHEAP the clean way: fvgp reads args["random_logdet_error_
+    # rtol"], and a loose value makes imate's stochastic-Lanczos stop at its floor
+    # (min_num_samples=10) instead of refining a number we discard. Tighten to 0.01
+    # under --train, which actually uses the value.
     _args = dict(args or {})
     _args.setdefault("random_logdet_error_rtol", float(logdet_rtol))
 
-    # skip_logdet: replace the log-determinant with 0.0 for a predict-only run.
-    # fvgp computes log|KV| in the constructor unconditionally (GPkv._refresh), but
-    # `logdet_KV` is READ only by gp_marginal_likelihood.py -- never on the predict
-    # path. So for a frozen-hyperparameter run it is pure, discarded work: ~200
-    # stochastic-Lanczos matvecs against the full 2e9-nnz sparse KV, single-threaded
-    # on the driver. Stub it out entirely (better than GPU-accelerating a number we
-    # throw away). MUST be off under --train, which does read it.
-    #
-    # gp_kv did `from .gp_lin_alg import *`, so the live reference is
-    # fvgp.gp_kv.calculate_random_logdet. Patch there, restore after construction
-    # (the only call is in the constructor; predict never recomputes the logdet).
-    import fvgp.gp_kv as _gpkv
-    _orig_logdet = _gpkv.calculate_random_logdet
-    if skip_logdet:
-        _gpkv.calculate_random_logdet = lambda KV, compute_device, args=None: 0.0
-        print("[gp] skip_logdet=True: stubbing the unread predict-only log-determinant")
-    try:
-        gp = GPOptimizer(
-            x_data=np.asarray(X_tr, float),
-            y_data=np.asarray(y_tr, float),
-            init_hyperparameters=init_hps,
-            noise_variances=jitter * np.ones(len(y_tr)),
-            compute_device=compute_device,
-            kernel_function=kern,
-            gp2Scale=True,
-            gp2Scale_batch_size=batch_size,
-            dask_client=client,
-            linalg_mode=linalg_mode,
-            args=_args,
-        )
-    finally:
-        _gpkv.calculate_random_logdet = _orig_logdet
+    gp = GPOptimizer(
+        x_data=np.asarray(X_tr, float),
+        y_data=np.asarray(y_tr, float),
+        init_hyperparameters=init_hps,
+        noise_variances=jitter * np.ones(len(y_tr)),
+        compute_device=compute_device,
+        kernel_function=kern,
+        gp2Scale=True,
+        gp2Scale_batch_size=batch_size,
+        dask_client=client,
+        linalg_mode=linalg_mode,
+        args=_args,
+    )
     return gp, kern
 
 
