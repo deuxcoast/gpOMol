@@ -129,6 +129,11 @@ def main():
     y_tr, y_te = ds.y[tr], ds.y[te]
     cat_tr, cat_te = ds.data_id[tr], ds.data_id[te]
     print(f"[run] train={len(tr):,} test={len(te):,}")
+    if len(te) < 1000:
+        print(f"[run] WARNING: only {len(te)} test points -> R² will be noisy "
+              f"(~+/-0.03-0.05). --test-size defaults to {args.test_size:g}, tuned for "
+              f"the 200k run; for a small-N baseline pass e.g. --test-size 0.2 to get "
+              f"~{int(len(idx)*0.2):,} test points.")
 
     client = connect_dask(args.scheduler_file, n_workers=args.workers)
 
