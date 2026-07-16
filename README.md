@@ -26,7 +26,7 @@ python -m ipykernel install --user --name gpomol --display-name gpomol
 
 > **`imate` is mandatory, not optional.** gpcam 8.4.1 / fvgp 4.8.3 import it inside
 > the gp2Scale constructor (for the randomised log-determinant), so it is needed to
-> even *instantiate* a gp2Scale `GPOptimizer` — not just to train one. Without it:
+> even _instantiate_ a gp2Scale `GPOptimizer` — not just to train one. Without it:
 > `Exception: You have activated 'gp2Scale'. You need to install imate manually.`
 
 A fresh interactive node does **not** have the env active. If `python` resolves to
@@ -80,9 +80,9 @@ so check it with `pgrep -u $USER -f dask`.
 
 ## Layout
 
-| path | role |
-|------|------|
-| `wl_gp2scale/` | distributed WL + gp2Scale GP for 200k molecules (see its `README.md`) |
-| `descriptor_eval/` | 10k-scale WL descriptor evaluation; `gp_parity.py` is the dense CPU reference kernel (R² ~0.09–0.12) that `wl_gp2scale` reproduces |
-| `hybrid_descriptor/` | 4M-scale gp2Scale pipeline, ARD Wendland–Mahalanobis kernel |
-| `train_4M/` | OMol25 ASE-LMDB shards (gitignored) |
+| path                 | role                                                                                                                               |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `wl_gp2scale/`       | distributed WL + gp2Scale GP for 200k molecules (see its `README.md`)                                                              |
+| `descriptor_eval/`   | 10k-scale WL descriptor evaluation; `gp_parity.py` is the dense CPU reference kernel (R² ~0.09–0.12) that `wl_gp2scale` reproduces |
+| `hybrid_descriptor/` | 4M-scale gp2Scale pipeline, ARD Wendland–Mahalanobis kernel                                                                        |
+| `train_4M/`          | OMol25 ASE-LMDB shards (gitignored)                                                                                                |

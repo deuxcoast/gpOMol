@@ -121,7 +121,13 @@ def connect_dask(scheduler_file=None, n_workers=16, poll_timeout=1800):
     if n_workers:
         print(f"[dask] waiting for {n_workers} workers ...")
         client.wait_for_workers(n_workers)
-    print(f"[dask] {len(client.scheduler_info()['workers'])} workers ready")
+    # client.nthreads() is a live RPC to the scheduler. client.scheduler_info() reads
+    # a CACHED identity that can lag right after wait_for_workers returns -- it once
+    # reported "5 workers ready" on a healthy 16-worker cluster (the scheduler log
+    # showed all 16 registered and none removed), which read as a cluster failure and
+    # cost a round of debugging. wait_for_workers returning is the authoritative fact.
+    n_live = len(client.nthreads())
+    print(f"[dask] {n_live} workers ready")
     return client
 
 
