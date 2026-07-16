@@ -48,7 +48,11 @@ export DASK_DISTRIBUTED__SCHEDULER__WORKER_SATURATION=1
 echo "python: $(which python)   PYTHONPATH=$PYTHONPATH"
 
 # --- launch the Dask cluster (both backgrounded, unlike the interactive script) ---
-sched="$SCRATCH/scheduler_file_gpOmol.json"
+# Per-JOB scheduler file: two batch jobs running at once (e.g. the 20k plumbing test
+# and the real 200k run) would otherwise both rm+write the same $SCRATCH file and
+# connect to the wrong scheduler. Keying it to $SLURM_JOB_ID makes concurrent jobs
+# independent.
+sched="$SCRATCH/scheduler_file_gpOmol_${SLURM_JOB_ID}.json"
 rm -f "$sched"
 
 dask scheduler --interface hsn0 --scheduler-file "$sched" &
@@ -73,4 +77,5 @@ rc=$?
 
 echo "driver exited with code $rc; tearing down cluster"
 kill "$workers_pid" "$sched_pid" 2>/dev/null
+rm -f "$sched"
 exit $rc
