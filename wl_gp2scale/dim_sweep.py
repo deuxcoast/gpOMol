@@ -35,14 +35,20 @@ from .pipeline import (build_gp, predict, release_gp, sort_by_category,
 from .reduce import regression_r2
 
 
-def _one_gp_r2(Z_tr, y_tr, cat_tr, Z_te, y_te, cutoff, dim, client, args):
+def _one_gp_r2(Z_tr, y_tr, cat_tr, Z_te, y_te, cat_te, cutoff, dim, client, args):
     """Build a frozen-hp gp2Scale GP on the dim-sliced embedding, predict test mean,
-    return predictive R^2. Category-tagged + sorted so cross-category blocks skip."""
+    return predictive R^2. Category-tagged + sorted so cross-category blocks skip.
+
+    TEST must carry its REAL categories: the kernel zeroes cross-category covariance,
+    so a test molecule tagged with the wrong category draws only on training molecules
+    of that wrong category -> its posterior mean collapses to the prior. (Tagging all
+    test rows with a single dummy category is only valid when TRAIN uses that same
+    single category, as in validate.sparse_vs_dense_parity.)"""
     from sklearn.metrics import r2_score
 
     Xtr = with_category_tag(Z_tr[:, :dim], cat_tr)
     Xtr, y_tr_s, _ = sort_by_category(Xtr, y_tr)
-    Xte = with_category_tag(Z_te[:, :dim], np.zeros(len(Z_te)))  # tag inert on predict
+    Xte = with_category_tag(Z_te[:, :dim], cat_te)
     sv = float(np.var(y_tr))
 
     gp, _ = build_gp(
@@ -73,7 +79,7 @@ def run(args, client):
         atoms_tr = [ds.atoms[i] for i in tr]
         atoms_te = [ds.atoms[i] for i in te]
         y_tr, y_te = ds.y[tr], ds.y[te]
-        cat_tr = ds.data_id[tr]
+        cat_tr, cat_te = ds.data_id[tr], ds.data_id[te]
 
         # one embedding per seed; dims slice it. vocab_sample=0 -> vocab on ALL train.
         pipe = WLGPPipeline(
@@ -88,7 +94,8 @@ def run(args, client):
             cutoff, _ = recalibrate(Z_tr[:, :d], percentile=args.cutoff_pct, dim=d)
             rep = sparsity_report(Z_tr[:, :d], cutoff, dim=d, data_id=cat_tr)
             ols = regression_r2(Z_tr[:, :d], y_tr, Z_te[:, :d], y_te)
-            gp_r2 = _one_gp_r2(Z_tr, y_tr, cat_tr, Z_te, y_te, cutoff, d, client, args)
+            gp_r2 = _one_gp_r2(Z_tr, y_tr, cat_tr, Z_te, y_te, cat_te, cutoff, d,
+                               client, args)
             print(f"[sweep] seed={seed} dim={d:>2}  cutoff={cutoff:.4f}  "
                   f"median_nbr={rep['median_neighbors']:.0f}  "
                   f"density={rep['density']:.2e}  OLS_R2={ols:.4f}  GP_R2={gp_r2:.4f}")
