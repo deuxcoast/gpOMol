@@ -174,3 +174,30 @@ with a fixed test set and nested train prefixes.
 
 Also open: `sparseLU` vs `sparseCG` at 200k (LU was ~100× more accurate in the
 bisect — `max|Δ|` 2.3e-06 vs 2.2e-04 — but its fill-in at 200k is the concern).
+
+## Status & direction (updated 2026-07-16)
+
+Verified on real OMol25: the sparse gp2Scale kernel reproduces the dense reference;
+`--cutoff-pct 25` = 2×R_inf, validated on the full 200k embedding; and the 200k
+embedding is measurably better than the 20k one (more data helps). `submit_200k.sh`
+runs the full job as a self-contained sbatch (bg scheduler+workers, fg driver).
+
+**Marcus Noack (gpCAM/fvgp author) reviewed the plan and redirected it — treat these
+as the next steps, over the older "learning curve / 8h batch" framing above:**
+
+1. **Predict-only should be minutes, not hours.** Our slow ~143s/20k solve is
+   *conditioning* (cond ~1e9), not size. The fix is a **preconditioner**
+   (`--linalg sparseCGpre`), not more walltime. Compute is abundant — don't optimize
+   for node-hours.
+2. **Stop normalizing the PLS embedding.** `reduce.py`'s streaming SIMPLS normalizes
+   each component to unit norm, which makes distances scale ~1/√N and is the *sole*
+   reason the cutoff doesn't transfer across N. Remove it (or match sklearn PLS's
+   N-stable scale) and the whole per-N cutoff-recalibration problem disappears.
+3. **Set the cutoff from the variogram** (`descriptor_eval/variogram.py`) — exclude
+   poorly-correlated points — and iterate quickly rather than over-theorizing R_inf.
+4. **Frozen now, train later.**
+
+Meta: per Marcus's "keep it simple," the current phase is *proving the descriptor
+works / does data help* — for which `descriptor_eval/` (dense, one node) is the right
+tool. This distributed module is the "prove it, then engineer" deliverable, built
+somewhat ahead of the proof.
