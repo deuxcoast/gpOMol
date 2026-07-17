@@ -21,6 +21,19 @@ p-dimensional deflation basis -- X is never densified and never deflated in plac
 Each component is a couple of O(nnz) sparse matvecs; 10 components over 200k rows
 is cheap.
 
+Scaling: NATURAL (not unit-norm) scores. The stored rotation is the SIMPLS unit
+weight ``w = S/||S||``, so ``transform`` returns the natural score ``t = Xtilde w``.
+Because Xtilde is standardised (unit-variance columns), ``var(t_a) = w_a^T Corr(X)
+w_a`` is a population quantity -- N-invariant. Textbook SIMPLS instead normalises
+each score to unit NORM (``t/||t||``), whose per-sample scale is ~1/sqrt(N); that
+made pairwise distances (hence the compact-support cutoff and every length-scale
+hyperparameter) shrink with N and forced a per-N recalibration. Natural scaling
+removes that N-dependence so hyperparameters transfer from small runs to 200k.
+Consequence: components now have UNEQUAL scale (leading dims spread wider), so an
+isotropic distance is dominated by the leading PLS dims -- see the truncated-R^2
+diagnostic (``truncated_r2_curve``) for whether the tail carries signal that an
+ARD (per-dim length-scale) kernel would need to reach.
+
 Gate. ``batch_pls_r2`` densifies a SMALL validation slice (8k/20k only) and fits
 sklearn ``PLSRegression`` so validate.py can assert streaming == batch R^2 before
 committing to the 200k run.
@@ -54,7 +67,10 @@ def _col_stats(X):
 @dataclass
 class SparsePLS:
     """Streaming SIMPLS on a sparse X. Fitted state is the p x A rotation matrix
-    (plus the standardisation stats), so transform is a single sparse matmul."""
+    (plus the standardisation stats), so transform is a single sparse matmul.
+
+    Rotations are UNIT SIMPLS weights, so ``transform`` returns natural (not
+    unit-norm) scores -- an N-invariant embedding scale (see module docstring)."""
 
     n_components: int = 10
     mu_: np.ndarray = field(default=None, repr=False)
@@ -84,21 +100,23 @@ class SparsePLS:
 
         S = self._bwd(X, yc)                      # p : Xtilde^T yc
         V = np.zeros((p, A))                      # deflation basis (orthonormal)
-        R = np.zeros((p, A))                      # rotations (weights)
+        R = np.zeros((p, A))                      # rotations (UNIT weights)
         for a in range(A):
             nrm = np.linalg.norm(S)
             if nrm < 1e-12:
                 R = R[:, :a]
                 break
-            r = S / nrm                           # univariate weight direction
-            t = self._fwd(X, r)                   # n : scores
+            w = S / nrm                           # unit weight direction (STORED)
+            t = self._fwd(X, w)                   # n : natural scores  Xtilde @ w
             tn = np.linalg.norm(t)
             if tn < 1e-12:
                 R = R[:, :a]
                 break
-            t = t / tn
-            r = r / tn
-            pl = self._bwd(X, t)                  # p : loading Xtilde^T t
+            # Unit-norm score is used ONLY to build the deflation basis. v = pl/||pl||
+            # is scale-invariant, so normalising t here does not change V or the
+            # deflation -- it only keeps the loadings at O(1) for numerics.
+            t_unit = t / tn
+            pl = self._bwd(X, t_unit)             # p : loading Xtilde^T t_unit
             if a > 0:
                 pl = pl - V[:, :a] @ (V[:, :a].T @ pl)   # orthogonalise vs basis
             vn = np.linalg.norm(pl)
@@ -106,7 +124,12 @@ class SparsePLS:
             V[:, a] = v
             S = S - v * float(v @ S)              # deflate cross-product
             S = S - V[:, : a + 1] @ (V[:, : a + 1].T @ S)  # full re-orthogonalise
-            R[:, a] = r
+            # Store the UNIT weight (not w/tn). transform then yields the natural
+            # score t = Xtilde @ w, whose per-sample scale is a population quantity
+            # (var = w^T Corr(X) w), N-INVARIANT -- so the cutoff/hyperparameters
+            # transfer across N. (The old w/tn stored unit-NORM scores, per-sample
+            # scale ~1/sqrt(N), which is why the cutoff had to be recalibrated per N.)
+            R[:, a] = w
         self.R_ = R
         return self
 
@@ -134,6 +157,37 @@ def regression_r2(Z_tr, y_tr, Z_te, y_te):
 
     lr = LinearRegression().fit(Z_tr, y_tr)
     return float(r2_score(y_te, lr.predict(Z_te)))
+
+
+def truncated_r2_curve(Z_tr, y_tr, Z_te, y_te, dims=None):
+    """Held-out OLS R^2 using only the FIRST k embedding dims, for k in ``dims``.
+
+    This is the decision instrument for isotropic-vs-ARD Wendland. With natural
+    (Option-1) scaling the leading PLS dims dominate an isotropic L2 distance, so
+    the kernel effectively sees only the top few components. If R^2 has already
+    saturated by then, an isotropic cutoff loses nothing and we keep it simple. If
+    R^2 keeps climbing through the tail dims, that later signal is exactly what an
+    isotropic distance drowns out -> ARD (per-dim length-scales) is warranted.
+
+    Returns a list of (k, r2) and prints the curve plus each dim's marginal gain and
+    the per-component score std (the anisotropy that makes this question live)."""
+    Z_tr = np.asarray(Z_tr, float)
+    Z_te = np.asarray(Z_te, float)
+    A = Z_tr.shape[1]
+    if dims is None:
+        dims = sorted({1, 2, 3, 5, A} & set(range(1, A + 1)))
+    stds = Z_tr.std(axis=0)
+    print(f"[trunc] per-component score std (train): {np.round(stds, 4)}")
+    print(f"[trunc]   std ratio dim1/dim{A} = {stds[0] / max(stds[-1], 1e-30):.1f}x "
+          f"(anisotropy an isotropic cutoff would weight by)")
+    curve, prev = [], None
+    for k in dims:
+        r2 = regression_r2(Z_tr[:, :k], y_tr, Z_te[:, :k], y_te)
+        gain = "" if prev is None else f"  (+{r2 - prev:.4f} vs previous)"
+        print(f"[trunc]   dims 1..{k:>2}: R^2 = {r2:.4f}{gain}")
+        curve.append((int(k), float(r2)))
+        prev = r2
+    return curve
 
 
 def batch_pls_r2(X_tr, y_tr, X_te, y_te, n_components=10):
