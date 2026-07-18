@@ -35,6 +35,11 @@ export PYTHONPATH="$SLURM_SUBMIT_DIR:${PYTHONPATH:-}"   # so workers import wl_g
 cd "$SLURM_SUBMIT_DIR"
 
 export MALLOC_TRIM_THRESHOLD_=0
+# Unbuffered stdout: batch jobs redirect stdout to a file, where Python block-buffers
+# print() -- so [data]/[wl]/[run] progress never appears until the process exits, and
+# a multi-hour run looks stalled when it is actually working. Force line-buffering so
+# the .out file is a live progress log.
+export PYTHONUNBUFFERED=1
 export DASK_DISTRIBUTED__COMM__TIMEOUTS__CONNECT=3600s
 export DASK_DISTRIBUTED__COMM__TIMEOUTS__TCP=3600s
 export DASK_DISTRIBUTED__SCHEDULER__WORK_STEALING=False
