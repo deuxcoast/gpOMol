@@ -185,6 +185,11 @@ def main():
     ap.add_argument("--cutoff-pct", type=float, default=25.0)
     ap.add_argument("--parity-n", type=int, default=3000, help="train rows for parity")
     ap.add_argument("--device", default="cpu", help="cpu (local) or cuda")
+    ap.add_argument("--linalg", default="sparseCG",
+                    help="fvgp solver for the parity check: sparseCG, sparseLU, or "
+                         "sparseCGpre (preconditioned; append _amg/_ilu to pick the "
+                         "type). Use sparseCGpre to confirm it converges to the same "
+                         "answer as the dense reference before the 200k run.")
     ap.add_argument("--workers", type=int, default=2, help="dask workers")
     ap.add_argument("--scheduler-file", default=None,
                     help="connect to srun-launched GPU workers (proper per-task GPU "
@@ -235,7 +240,7 @@ def main():
     kt = min(args.parity_n // 3 or 1, len(Z_te))
     sparse_vs_dense_parity(
         Z_tr[:k], y_tr[:k], Z_te[:kt], cutoff, client, y_te=y_te[:kt],
-        device=args.device, linalg_mode="sparseCG",
+        device=args.device, linalg_mode=args.linalg,
     )
 
     client.close()
