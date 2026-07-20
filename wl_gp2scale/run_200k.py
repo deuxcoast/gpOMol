@@ -65,6 +65,10 @@ def build_argparser():
     ap.add_argument("--depth", type=int, default=3)
     ap.add_argument("--pls", type=int, default=10)
     ap.add_argument("--cutoff-pct", type=float, default=25.0)
+    ap.add_argument("--cutoff", type=float, default=None,
+                    help="absolute compact-support radius (embedding units); OVERRIDES "
+                         "--cutoff-pct. The embedding scale is N-invariant, so a radius "
+                         "picked once (variogram/R_inf) transfers across N.")
     ap.add_argument("--vocab-sample", type=int, default=0,
                     help="0 = fit WL vocab on ALL train molecules (recommended: no "
                          "train OOV, no dropped signal). >0 caps it to a stratified "
@@ -139,7 +143,8 @@ def main():
 
     pipe = WLGPPipeline(
         depth=args.depth, min_count=args.min_count, pls_components=args.pls,
-        cutoff_percentile=args.cutoff_pct, vocab_sample=args.vocab_sample,
+        cutoff_percentile=args.cutoff_pct, cutoff_abs=args.cutoff,
+        vocab_sample=args.vocab_sample,
     )
     Z_tr = pipe.fit(atoms_tr, y_tr, cat_tr, client=client, chunk=args.chunk)
     Z_te = pipe.transform(atoms_te, client=client, chunk=args.chunk)

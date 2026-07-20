@@ -39,31 +39,47 @@ from __future__ import annotations
 import numpy as np
 
 
-def radius_from_bins(bin_median_nn, bin_rmse, baseline):
-    """The informative radius, given a per-bin RMSE profile.
+def _rolling_median(a, w=3):
+    """Odd-window rolling median (edges shrink the window). De-noises a per-bin RMSE
+    profile so one fluctuating bin cannot move the radius."""
+    a = np.asarray(a, float)
+    n = len(a)
+    if n < w:
+        return a.copy()
+    h = w // 2
+    return np.array([np.median(a[max(0, i - h): min(n, i + h + 1)]) for i in range(n)])
 
-    MARGINAL question -- "does a neighbour at this distance still carry signal?" --
-    because that is what decides the cutoff. (The cumulative curve answers a
-    different question and stays under the baseline well past the point where
-    individual predictions are already bad, since the good near points dominate the
-    aggregate: measured 0.01012 cumulative vs a ~0.006 per-bin cliff.)
 
-    Scan from the FAR end, walk in over the contiguous run of bins that fail the
-    baseline, and return the median of the last bin inside it. On a clean monotonic
-    curve this agrees with gp_parity.py; unlike its scan-outward-and-stop rule it is
-    not aborted by an isolated noisy near bin. Returns None only if every bin fails.
+def radius_from_bins(bin_median_nn, bin_rmse, baseline, tol=0.9, smooth=True):
+    """The informative radius from a per-bin RMSE profile.
+
+    MARGINAL question -- "does a neighbour at this distance still carry USEFUL signal?"
+    A bin is uninformative once its RMSE reaches ``tol * baseline`` (default 0.9):
+    predicting only marginally better than the mean is not useful, so the threshold is
+    ``tol*baseline``, NOT the bare baseline. (Using the bare baseline was a bug -- a
+    noisy tail that tops out at ~0.98*baseline then never "fails", so the radius ran all
+    the way out to the last bin.)
+
+    Robustness: per-bin RMSE is noisy (~nte/n_bins points per bin), so the tail can
+    alternate fail/good/fail. We median-smooth the profile (window 3), then scan
+    OUTWARD for the first SUSTAINED crossing: the first bin that is itself
+    uninformative AND whose outward tail is predominantly uninformative
+    (``median(r[i:]) >= tol*baseline``). The tail-median guard means an isolated near
+    spike does NOT trigger (its tail is still mostly good) and an isolated good bin
+    does NOT rescue a bad tail. The radius is the last informative bin before that
+    cliff. Returns None if the very first bin already triggers (error flat in distance
+    -> representational, not density); returns the last bin if no cliff is found.
     """
     med = np.asarray(bin_median_nn, float)
     rms = np.asarray(bin_rmse, float)
     if med.size == 0 or not baseline:
         return None
-    bad = rms >= baseline
-    if bad.all():
-        return None                     # nothing beats the mean, at any distance
-    k = len(bad)
-    while k > 0 and bad[k - 1]:         # walk in over the failing tail
-        k -= 1
-    return float(med[k - 1]) if k > 0 else None
+    r = _rolling_median(rms) if (smooth and len(rms) >= 3) else rms
+    thresh = tol * baseline
+    for i in range(len(r)):
+        if r[i] >= thresh and float(np.median(r[i:])) >= thresh:
+            return float(med[i - 1]) if i > 0 else None
+    return float(med[-1])               # tail never predominantly bad -> informative to end
 
 
 def rmse_vs_nn_distance(nn_dist, y_true, y_pred, n_bins=10, tol=0.9):
@@ -76,10 +92,12 @@ def rmse_vs_nn_distance(nn_dist, y_true, y_pred, n_bins=10, tol=0.9):
     aborts the scan and reports no radius at all -- even when most bins beat the
     baseline.
 
-    So the radius is taken from the CUMULATIVE curve instead: RMSE over ALL test
-    points with nn-dist <= d, which is both what "how far out can I trust this"
-    actually means and far less noisy (it aggregates rather than partitions). The
-    radius is the largest bin edge whose cumulative RMSE is still < tol * baseline.
+    The radius (via radius_from_bins) is the per-bin MARGINAL cliff: the last bin
+    before RMSE reaches ``tol*baseline``, computed on a MEDIAN-SMOOTHED profile so a
+    single noisy bin cannot move it. The CUMULATIVE curve is also returned for context
+    but is NOT used for the radius -- the good near points dominate the aggregate, so it
+    stays under the baseline well past the point where individual (marginal) predictions
+    are already useless.
 
     `radius` is None only when even the nearest points fail to beat tol*baseline --
     which really would mean the error is flat in distance, i.e. representational.
@@ -110,7 +128,7 @@ def rmse_vs_nn_distance(nn_dist, y_true, y_pred, n_bins=10, tol=0.9):
         cum_d.append(float(d))
         cum_rmse.append(float(np.sqrt(se[m].mean())))
 
-    radius = radius_from_bins(med, rms, baseline)
+    radius = radius_from_bins(med, rms, baseline, tol=tol)
 
     return {
         "bin_median_nn": np.array(med),
