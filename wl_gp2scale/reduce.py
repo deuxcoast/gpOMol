@@ -9,9 +9,11 @@ is diffuse across many low-correlation WL columns that only PLS's multivariate
 projection captures; unsupervised / prescreened reductions were measured to lose
 0.1-0.4 R^2. So we keep full PLS and make it scale by streaming.
 
-How it stays sparse. Standardisation would normally subtract a dense column mean
-and densify X. Instead we keep X sparse and fold standardisation into two matvecs
-of an implicit operator ``Xtilde = (X - 1 mu^T) diag(1/std)``:
+How it stays sparse. Centring/scaling would normally subtract a dense column mean
+and densify X. Instead we keep X sparse and fold the per-column weight into two
+matvecs of an implicit operator ``Xtilde = (X - 1 mu^T) diag(1/std)``, where ``std``
+is the chosen scaling's weight (pareto=sqrt(col-std) by DEFAULT, standard=col-std,
+center=1 -- see SparsePLS.scaling; the grid picked pareto):
 
     Xtilde @ r       = X @ (r/std)          - (m . r) * 1_n
     Xtilde^T @ t     = (X^T @ t) / std      - (sum t) * m         ,  m = mu/std
@@ -23,8 +25,8 @@ is cheap.
 
 Scaling: NATURAL (not unit-norm) scores. The stored rotation is the SIMPLS unit
 weight ``w = S/||S||``, so ``transform`` returns the natural score ``t = Xtilde w``.
-Because Xtilde is standardised (unit-variance columns), ``var(t_a) = w_a^T Corr(X)
-w_a`` is a population quantity -- N-invariant. Textbook SIMPLS instead normalises
+Because the per-column weighting is a fixed population statistic, ``var(t_a) =
+w_a^T Cov(Xtilde) w_a`` is a population quantity -- N-invariant. Textbook SIMPLS instead normalises
 each score to unit NORM (``t/||t||``), whose per-sample scale is ~1/sqrt(N); that
 made pairwise distances (hence the compact-support cutoff and every length-scale
 hyperparameter) shrink with N and forced a per-N recalibration. Natural scaling
@@ -70,9 +72,28 @@ class SparsePLS:
     (plus the standardisation stats), so transform is a single sparse matmul.
 
     Rotations are UNIT SIMPLS weights, so ``transform`` returns natural (not
-    unit-norm) scores -- an N-invariant embedding scale (see module docstring)."""
+    unit-norm) scores -- an N-invariant embedding scale (see module docstring).
+
+    ``scaling`` sets the per-column pre-weighting folded into the implicit operator.
+    DEFAULT is "pareto", chosen from a scaling x min_count x n_components held-out
+    OLS grid (3 seeds, 20k):
+      * "pareto" (DEFAULT): divide by sqrt(std). Best robustness/signal trade-off in
+        the grid -- ~0.34 held-out R^2 at min_count=2 with NO toxic tail and
+        essentially no min_count sensitivity. Ties full standardisation's best
+        (~0.36, but that needs min_count>=10 and goes NEGATIVE at low min_count).
+      * "standard": z-score, divide by std -> unit-variance columns. On a sparse WL
+        count matrix this INFLATES a feature present in k of N molecules to a spike of
+        height ~sqrt(N/k) (independent of its count), so rare features get
+        high-variance cross-covariance estimates that greedy SIMPLS overfits. With
+        min_count=2 (the production prune) this is ANTI-PREDICTIVE (R^2 < 0 by dim 10).
+      * "center": subtract mean only (std:=1). Fully min_count-insensitive (confirms
+        /std is the root cause) but underfits (~0.25) by under-weighting mid-freq
+        signal. WL columns are already same-unit per-atom counts, so standardisation
+        was never needed for commensurability.
+    """
 
     n_components: int = 10
+    scaling: str = "pareto"
     mu_: np.ndarray = field(default=None, repr=False)
     std_: np.ndarray = field(default=None, repr=False)
     m_: np.ndarray = field(default=None, repr=False)          # mu/std
@@ -91,7 +112,14 @@ class SparsePLS:
     def fit(self, X, y):
         X = sp.csr_matrix(X)
         y = np.asarray(y, dtype=float).ravel()
-        self.mu_, self.std_ = _col_stats(X)
+        self.mu_, std = _col_stats(X)
+        if self.scaling == "center":
+            std = np.ones_like(std)               # center only (no /std)
+        elif self.scaling == "pareto":
+            std = np.sqrt(std)                    # milder than full standardisation
+        elif self.scaling != "standard":
+            raise ValueError("scaling must be 'standard', 'center', or 'pareto'")
+        self.std_ = std
         self.m_ = self.mu_ / self.std_
         self.y_mean_ = float(y.mean())
         yc = y - self.y_mean_
@@ -190,9 +218,13 @@ def truncated_r2_curve(Z_tr, y_tr, Z_te, y_te, dims=None):
     return curve
 
 
-def batch_pls_r2(X_tr, y_tr, X_te, y_te, n_components=10):
-    """Reference: dense standardise + sklearn PLSRegression on a SMALL slice.
-    Returns (embedding-OLS R^2, PLSRegression.score R^2). Only for validate.py."""
+def batch_pls_r2(X_tr, y_tr, X_te, y_te, n_components=10, scaling="pareto"):
+    """Reference: dense pre-scale + sklearn PLSRegression on a SMALL slice.
+    Returns (embedding-OLS R^2, PLSRegression.score R^2). Only for validate.py.
+
+    ``scaling`` MUST match the SparsePLS scaling under test or the parity gate is
+    meaningless (it would compare two different embeddings). Applies the same
+    per-column weight as SparsePLS: pareto=/sqrt(std), standard=/std, center=none."""
     from sklearn.cross_decomposition import PLSRegression
 
     X_tr = np.asarray(X_tr.todense()) if sp.issparse(X_tr) else np.asarray(X_tr)
@@ -200,8 +232,16 @@ def batch_pls_r2(X_tr, y_tr, X_te, y_te, n_components=10):
     mu = X_tr.mean(axis=0)
     std = X_tr.std(axis=0)
     std[std == 0] = 1.0
-    Xs_tr = (X_tr - mu) / std
-    Xs_te = (X_te - mu) / std
+    if scaling == "center":
+        w = np.ones_like(std)
+    elif scaling == "pareto":
+        w = np.sqrt(std)
+    elif scaling == "standard":
+        w = std
+    else:
+        raise ValueError("scaling must be 'standard', 'center', or 'pareto'")
+    Xs_tr = (X_tr - mu) / w
+    Xs_te = (X_te - mu) / w
     pls = PLSRegression(n_components=n_components, scale=False).fit(Xs_tr, y_tr)
     Z_tr, Z_te = pls.transform(Xs_tr), pls.transform(Xs_te)
     return regression_r2(Z_tr, y_tr, Z_te, y_te), float(pls.score(Xs_te, y_te))

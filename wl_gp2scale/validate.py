@@ -110,17 +110,23 @@ def sparsity(Z, cutoff, dim, data_id=None):
 # ----------------------------- 4: streaming-PLS parity ---------------------
 
 
-def streaming_pls_parity(X_tr, y_tr, X_te, y_te, n_components=10, tol=0.02):
+def streaming_pls_parity(X_tr, y_tr, X_te, y_te, n_components=10, tol=0.02,
+                         scaling="pareto"):
     """Assert streaming SIMPLS embedding R^2 matches batch PLSRegression on a small
-    slice (dense reference allowed here). Gate for the 200k reduction."""
-    spls = SparsePLS(n_components=n_components).fit(X_tr, y_tr)
+    slice (dense reference allowed here). Gate for the 200k reduction. ``scaling``
+    must match the production SparsePLS scaling on BOTH sides or the comparison is
+    between two different embeddings."""
+    spls = SparsePLS(n_components=n_components, scaling=scaling).fit(X_tr, y_tr)
     Z_tr, Z_te = spls.transform(X_tr), spls.transform(X_te)
     r2_stream = regression_r2(Z_tr, y_tr, Z_te, y_te)
-    r2_batch_emb, r2_batch_pls = batch_pls_r2(X_tr, y_tr, X_te, y_te, n_components)
+    r2_batch_emb, r2_batch_pls = batch_pls_r2(
+        X_tr, y_tr, X_te, y_te, n_components, scaling=scaling
+    )
     ok = abs(r2_stream - r2_batch_emb) < tol
     print(
-        f"[val] PLS parity: streaming R²={r2_stream:.4f} vs batch R²={r2_batch_emb:.4f} "
-        f"(sklearn .score={r2_batch_pls:.4f}) -> {'PASS' if ok else 'FAIL'}"
+        f"[val] PLS parity [{scaling}]: streaming R²={r2_stream:.4f} vs batch "
+        f"R²={r2_batch_emb:.4f} (sklearn .score={r2_batch_pls:.4f}) -> "
+        f"{'PASS' if ok else 'FAIL'}"
     )
     return {
         "r2_streaming": r2_stream,
@@ -185,6 +191,11 @@ def main():
     ap.add_argument("--cutoff-pct", type=float, default=25.0)
     ap.add_argument("--parity-n", type=int, default=3000, help="train rows for parity")
     ap.add_argument("--device", default="cpu", help="cpu (local) or cuda")
+    ap.add_argument("--linalg", default="sparseCG",
+                    help="fvgp solver for the parity check: sparseCG, sparseLU, or "
+                         "sparseCGpre (preconditioned; append _amg/_ilu to pick the "
+                         "type). Use sparseCGpre to confirm it converges to the same "
+                         "answer as the dense reference before the 200k run.")
     ap.add_argument("--workers", type=int, default=2, help="dask workers")
     ap.add_argument("--scheduler-file", default=None,
                     help="connect to srun-launched GPU workers (proper per-task GPU "
@@ -235,7 +246,7 @@ def main():
     kt = min(args.parity_n // 3 or 1, len(Z_te))
     sparse_vs_dense_parity(
         Z_tr[:k], y_tr[:k], Z_te[:kt], cutoff, client, y_te=y_te[:kt],
-        device=args.device, linalg_mode="sparseCG",
+        device=args.device, linalg_mode=args.linalg,
     )
 
     client.close()
