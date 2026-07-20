@@ -2,9 +2,14 @@
 dim_sweep.py  (wl_gp2scale)
 ===========================
 Confirm on the ACTUAL gp2Scale Wendland kernel what the truncated-R^2 diagnostic
-(reduce.truncated_r2_curve) predicted on OLS: that a low-dim slice of the natural-
-scaled PLS embedding is MORE predictive than the full 10-D, because the tail
-components are noise. Sweeps embedding dim x split-seed and reports predictive R^2.
+(reduce.truncated_r2_curve) predicted on OLS. Sweeps embedding dim x cutoff x
+split-seed and reports predictive R^2 + realised density.
+
+Cutoff sweep: pass ``--cutoffs 0.16 0.22 0.28 ...`` to test several ABSOLUTE radii
+while REUSING one embedding per seed (featurise + PLS are cutoff-independent; only
+the kernel changes). This is the cheap way to pick the cutoff -- look for the largest
+GP_R2 whose median in-support neighbour count is still well-conditioned (tens, not
+hundreds). ``--cutoff`` (single) and ``--cutoff-pct`` (per-dim percentile) still work.
 
 For each split seed:
   * fit vocab (ALL train -> 0% train OOV) + natural-scaled PLS(pls_components) on
@@ -63,6 +68,18 @@ def _one_gp_r2(Z_tr, y_tr, cat_tr, Z_te, y_te, cat_te, cutoff, dim, client, args
     return r2
 
 
+def _cutoffs_for_dim(Z_tr, d, args):
+    """Cutoffs to test at embedding dim ``d``. Precedence: --cutoffs (an absolute
+    sweep, reusing the embedding) > --cutoff (single absolute) > --cutoff-pct (one
+    per-dim percentile of the pairwise distances, the legacy default)."""
+    if args.cutoffs:
+        return [float(c) for c in args.cutoffs]
+    if args.cutoff is not None:
+        return [float(args.cutoff)]
+    c, _ = recalibrate(Z_tr[:, :d], percentile=args.cutoff_pct, dim=d)
+    return [float(c)]
+
+
 def run(args, client):
     from sklearn.model_selection import train_test_split
 
@@ -91,29 +108,32 @@ def run(args, client):
         Z_te = pipe.transform(atoms_te, client=client)
 
         for d in dims:
-            if args.cutoff is not None:
-                cutoff = float(args.cutoff)          # absolute radius, same for all dims
-            else:
-                cutoff, _ = recalibrate(Z_tr[:, :d], percentile=args.cutoff_pct, dim=d)
-            rep = sparsity_report(Z_tr[:, :d], cutoff, dim=d, data_id=cat_tr)
+            # OLS R^2 is cutoff-INDEPENDENT (linear probe on Z[:, :d]) -> compute once
+            # per dim and reuse across every cutoff. The GP kernel is the only thing that
+            # changes with the cutoff, so the whole embedding (featurise + PLS) is reused.
             ols = regression_r2(Z_tr[:, :d], y_tr, Z_te[:, :d], y_te)
-            gp_r2 = _one_gp_r2(Z_tr, y_tr, cat_tr, Z_te, y_te, cat_te, cutoff, d,
-                               client, args)
-            print(f"[sweep] seed={seed} dim={d:>2}  cutoff={cutoff:.4f}  "
-                  f"median_nbr={rep['median_neighbors']:.0f}  "
-                  f"density={rep['density']:.2e}  OLS_R2={ols:.4f}  GP_R2={gp_r2:.4f}")
-            rows.append((seed, d, cutoff, rep['median_neighbors'], ols, gp_r2))
+            for cutoff in _cutoffs_for_dim(Z_tr, d, args):
+                rep = sparsity_report(Z_tr[:, :d], cutoff, dim=d, data_id=cat_tr)
+                gp_r2 = _one_gp_r2(Z_tr, y_tr, cat_tr, Z_te, y_te, cat_te, cutoff, d,
+                                   client, args)
+                print(f"[sweep] seed={seed} dim={d:>2}  cutoff={cutoff:.4f}  "
+                      f"median_nbr={rep['median_neighbors']:.0f}  "
+                      f"density={rep['density']:.2e}  OLS_R2={ols:.4f}  GP_R2={gp_r2:.4f}")
+                rows.append((seed, d, cutoff, rep['median_neighbors'], ols, gp_r2))
 
     print("\n================= SUMMARY =================")
     print(f"{'seed':>5} {'dim':>4} {'cutoff':>8} {'med_nbr':>8} {'OLS_R2':>8} {'GP_R2':>8}")
     for s, d, c, nb, ols, gp in rows:
         print(f"{s:>5} {d:>4} {c:>8.4f} {nb:>8.0f} {ols:>8.4f} {gp:>8.4f}")
-    # per-dim mean/std across seeds
-    print("\n--- GP_R2 across seeds, by dim ---")
-    for d in dims:
-        vals = np.array([gp for (s, dd, c, nb, ols, gp) in rows if dd == d])
-        print(f"  dim={d:>2}: GP_R2 mean={vals.mean():.4f}  std={vals.std():.4f}  "
-              f"n={len(vals)}  values={np.round(vals,4)}")
+    # mean/std across seeds, by (dim, cutoff). For an absolute cutoff sweep the cutoff
+    # is identical across seeds so each group has one value per seed; for the percentile
+    # default the recalibrated cutoff varies slightly per seed (groups of ~1).
+    print("\n--- GP_R2 across seeds, by (dim, cutoff) ---")
+    for (d, c) in sorted({(dd, round(cc, 4)) for (s, dd, cc, nb, ols, gp) in rows}):
+        vals = np.array([gp for (s, dd, cc, nb, ols, gp) in rows
+                         if dd == d and round(cc, 4) == c])
+        print(f"  dim={d:>2} cutoff={c:>7.4f}: GP_R2 mean={vals.mean():.4f}  "
+              f"std={vals.std():.4f}  n={len(vals)}  values={np.round(vals,4)}")
     if args.out:
         np.savez(args.out, rows=np.array(rows, dtype=float),
                  dims=np.array(dims), seeds=np.array(args.seeds))
@@ -136,6 +156,10 @@ def main():
     ap.add_argument("--min-count", type=int, default=2)
     ap.add_argument("--depth", type=int, default=3)
     ap.add_argument("--cutoff-pct", type=float, default=25.0)
+    ap.add_argument("--cutoffs", type=float, nargs="+", default=None,
+                    help="sweep these ABSOLUTE cutoffs, reusing the embedding (built "
+                         "once per seed) across all of them; overrides --cutoff / "
+                         "--cutoff-pct. e.g. --cutoffs 0.16 0.22 0.28 0.35 0.44")
     ap.add_argument("--cutoff", type=float, default=None,
                     help="absolute compact-support radius; overrides --cutoff-pct "
                          "(applied to every --dims slice)")
