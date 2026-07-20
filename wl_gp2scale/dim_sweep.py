@@ -85,7 +85,7 @@ def run(args, client):
         pipe = WLGPPipeline(
             depth=args.depth, min_count=args.min_count,
             pls_components=args.pls, cutoff_percentile=args.cutoff_pct,
-            vocab_sample=0,
+            scaling=args.scaling, vocab_sample=0,
         )
         Z_tr = pipe.fit(atoms_tr, y_tr, cat_tr, client=client)
         Z_te = pipe.transform(atoms_te, client=client)
@@ -126,6 +126,9 @@ def main():
                     help="TRAIN/TEST split seeds (the stability axis)")
     ap.add_argument("--dims", type=int, nargs="+", default=[4, 10])
     ap.add_argument("--pls", type=int, default=10, help="PLS components fit (>= max dim)")
+    ap.add_argument("--scaling", default="pareto",
+                    choices=["pareto", "standard", "center"],
+                    help="SparsePLS column pre-weighting (default pareto)")
     ap.add_argument("--test-size", type=float, default=0.2)
     ap.add_argument("--min-count", type=int, default=2)
     ap.add_argument("--depth", type=int, default=3)

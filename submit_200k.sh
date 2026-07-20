@@ -37,8 +37,9 @@ cd "$SLURM_SUBMIT_DIR"
 export MALLOC_TRIM_THRESHOLD_=0
 # Unbuffered stdout: batch jobs redirect stdout to a file, where Python block-buffers
 # print() -- so [data]/[wl]/[run] progress never appears until the process exits, and
-# a multi-hour run looks stalled when it is actually working. Force line-buffering so
-# the .out file is a live progress log.
+# a multi-hour run looks stalled when it is actually working. Force it so the .out
+# file is a live progress log.
+
 export PYTHONUNBUFFERED=1
 export DASK_DISTRIBUTED__COMM__TIMEOUTS__CONNECT=3600s
 export DASK_DISTRIBUTED__COMM__TIMEOUTS__TCP=3600s
@@ -74,9 +75,13 @@ workers_pid=$!
 # --- the driver runs in the FOREGROUND; when it returns, the job ends ------------
 # pct=25 = signal-optimal cutoff (the reason for the 8h job). --no-variance because
 # posterior variance is one solve PER test point. connect_dask waits for all 16.
+# --linalg sparseCGpre: preconditioned CG (ILU by default). Plain sparseCG on this
+# ill-conditioned Gram (cond ~1e9) ran 7h+ without converging; the preconditioner is
+# the fix (Marcus). To try another preconditioner use e.g. --linalg sparseCGpre_amg
+# (fvgp parses the _<type> suffix into args["sparse_preconditioner_type"]).
 python -m wl_gp2scale.run_200k \
     --n "$N_MOL" --min-count 2 --cutoff-pct 25 --test-size 0.02 \
-    --no-variance --workers "$N_WORKERS" --device cuda \
+    --no-variance --workers "$N_WORKERS" --device cuda --linalg sparseCGpre \
     --scheduler-file "$sched" --out "cache/preds_${N_MOL}.npz"
 rc=$?
 

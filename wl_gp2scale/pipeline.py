@@ -33,6 +33,7 @@ class WLGPPipeline:
     depth: int = 3
     min_count: int = 5
     pls_components: int = 10
+    scaling: str = "pareto"  # SparsePLS column pre-weighting (grid-chosen; see reduce)
     cutoff_percentile: float = 25.0
     vocab_sample: int = 0  # 0 = fit vocab on ALL train (no OOV); >0 = stratified cap
     cutoff_mult: float = 1.2
@@ -67,7 +68,9 @@ class WLGPPipeline:
         ).fit(fit_atoms)
 
         X_tr = self.featurizer.transform(atoms, client=client, chunk=chunk)
-        self.reducer = SparsePLS(n_components=self.pls_components).fit(X_tr, y)
+        self.reducer = SparsePLS(
+            n_components=self.pls_components, scaling=self.scaling
+        ).fit(X_tr, y)
         Z_tr = self.reducer.transform(X_tr)
         self.dim_ = Z_tr.shape[1]
         self.cutoff_, _ = recalibrate(
