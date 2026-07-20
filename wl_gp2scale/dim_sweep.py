@@ -91,7 +91,10 @@ def run(args, client):
         Z_te = pipe.transform(atoms_te, client=client)
 
         for d in dims:
-            cutoff, _ = recalibrate(Z_tr[:, :d], percentile=args.cutoff_pct, dim=d)
+            if args.cutoff is not None:
+                cutoff = float(args.cutoff)          # absolute radius, same for all dims
+            else:
+                cutoff, _ = recalibrate(Z_tr[:, :d], percentile=args.cutoff_pct, dim=d)
             rep = sparsity_report(Z_tr[:, :d], cutoff, dim=d, data_id=cat_tr)
             ols = regression_r2(Z_tr[:, :d], y_tr, Z_te[:, :d], y_te)
             gp_r2 = _one_gp_r2(Z_tr, y_tr, cat_tr, Z_te, y_te, cat_te, cutoff, d,
@@ -133,6 +136,9 @@ def main():
     ap.add_argument("--min-count", type=int, default=2)
     ap.add_argument("--depth", type=int, default=3)
     ap.add_argument("--cutoff-pct", type=float, default=25.0)
+    ap.add_argument("--cutoff", type=float, default=None,
+                    help="absolute compact-support radius; overrides --cutoff-pct "
+                         "(applied to every --dims slice)")
     ap.add_argument("--jitter", type=float, default=1e-6)
     ap.add_argument("--batch-size", type=int, default=10_000)
     ap.add_argument("--pred-batch", type=int, default=2000)

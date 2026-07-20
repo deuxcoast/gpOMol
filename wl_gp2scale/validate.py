@@ -189,6 +189,8 @@ def main():
     ap.add_argument("--depth", type=int, default=3)
     ap.add_argument("--pls", type=int, default=10)
     ap.add_argument("--cutoff-pct", type=float, default=25.0)
+    ap.add_argument("--cutoff", type=float, default=None,
+                    help="absolute compact-support radius; overrides --cutoff-pct")
     ap.add_argument("--parity-n", type=int, default=3000, help="train rows for parity")
     ap.add_argument("--device", default="cpu", help="cpu (local) or cuda")
     ap.add_argument("--linalg", default="sparseCG",
@@ -222,7 +224,7 @@ def main():
 
     pipe = WLGPPipeline(
         depth=args.depth, min_count=args.min_count, pls_components=args.pls,
-        cutoff_percentile=args.cutoff_pct,
+        cutoff_percentile=args.cutoff_pct, cutoff_abs=args.cutoff,
     )
     Z_tr = pipe.fit(atoms_tr, y_tr, cat_tr, client=client)
     Z_te = pipe.transform(atoms_te, client=client)

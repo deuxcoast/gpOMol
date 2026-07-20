@@ -77,8 +77,11 @@ def build_argparser():
     ap.add_argument("--pls", type=int, default=10)
     ap.add_argument("--cutoff-pct", type=float, default=25.0,
                     help="bisect mode: the cutoff percentile to test at")
+    ap.add_argument("--cutoff", type=float, default=None,
+                    help="absolute compact-support radius; overrides --cutoff-pct")
     ap.add_argument("--ntr", type=int, default=3000, help="train rows for the test")
-    ap.add_argument("--nte", type=int, default=1000, help="test rows for the test")
+    ap.add_argument("--nte", type=int, default=3000,
+                    help="test rows (more -> less noisy per-bin RMSE in radius mode)")
     ap.add_argument("--jitter", type=float, default=1e-6)
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--device", default="cpu")
@@ -129,7 +132,8 @@ def _load_embedding(args):
     tr, te = train_test_split(idx, test_size=args.test_size, random_state=42)
 
     pipe = WLGPPipeline(depth=args.depth, min_count=args.min_count,
-                        pls_components=args.pls, cutoff_percentile=args.cutoff_pct)
+                        pls_components=args.pls, cutoff_percentile=args.cutoff_pct,
+                        cutoff_abs=args.cutoff)
     Z_tr = pipe.fit([ds.atoms[i] for i in tr], ds.y[tr], ds.data_id[tr], client=None)
     Z_te = pipe.transform([ds.atoms[i] for i in te], client=None)
 
@@ -269,12 +273,26 @@ def run_variogram(args, E):
               f"the sampled distances -> no decorrelation resolved. The correlation "
               f"length is larger than the data spans (or the signal is representational,"
               f" not spatial). Rerun at larger --n or inspect the curve/plot.")
-    else:
+    if rng is not None:
         print(f"\n[vario] effective RANGE = {rng:.5f} embedding units "
               f"(gamma reaches {args.sill_frac:.0%} of sill here).")
-        print(f"[vario]   Nominal compact-support radius; the Wendland tapers INSIDE the")
-        print(f"[vario]   cutoff (psi(0.5)=0.19), so the honest support is")
-        print(f"[vario]   cutoff = 2*range = {2*rng:.5f} (psi=0.19 at the range).")
+        print(f"[vario]   Recommended cutoff = the range itself, no multiplier "
+              f"(--cutoff {rng:.5f}): the Wendland tapering to zero at the range is the")
+        print(f"[vario]   intended behaviour -- it EXCLUDES the poorly-correlated shell and")
+        print(f"[vario]   keeps the kernel sparse/well-conditioned. Raise --cutoff only if")
+        print(f"[vario]   a sweep shows higher R^2 without wrecking conditioning.")
+
+        # tie the SIGNAL radius to CONDITIONING: density / neighbours at the cutoff.
+        print(f"\n[vario] kernel density at cutoff={rng:.5f} (= range):")
+        rep = sparsity_report(Z, rng, dim=dim, data_id=cat)
+        med = rep["median_neighbors"]
+        if med > 200:
+            print(f"[vario]   median {med:.0f} in-support neighbours is HIGH -> the signal "
+                  f"radius is denser than is well-conditioned; the density guard "
+                  f"(--cutoff-pct) is the binding constraint, tighten the cutoff.")
+        elif med < 10:
+            print(f"[vario]   median {med:.0f} in-support neighbours is LOW -> risk of mean "
+                  f"reversion; this radius may be too tight for good coverage.")
 
     # Trend / non-stationarity check. A supervised PLS embedding orients y linearly
     # along the leading axes, so y is NON-stationary in embedding space: the variogram
@@ -290,24 +308,11 @@ def run_variogram(args, E):
               f"here), or run the variogram on the OLS-detrended residual for a clean "
               f"local range.")
 
-        # tie the SIGNAL radius to CONDITIONING: density / neighbours at each candidate
-        for label, R in [("range", rng), ("2*range (recommended cutoff)", 2 * rng)]:
-            print(f"\n[vario] kernel density at cutoff={R:.5f} ({label}):")
-            rep = sparsity_report(Z, R, dim=dim, data_id=cat)
-            med = rep["median_neighbors"]
-            if med > 200:
-                print(f"[vario]   median {med:.0f} in-support neighbours is HIGH -> the "
-                      f"signal radius is denser than is well-conditioned; consider the "
-                      f"density-capped radius (--cutoff-pct) as the binding constraint.")
-            elif med < 10:
-                print(f"[vario]   median {med:.0f} in-support neighbours is LOW -> risk of "
-                      f"mean reversion; this radius may be too tight for good coverage.")
-
     # N-invariance: recompute the range on subsamples of the training pool. Under the
     # current natural+pareto scaling this should be ~CONSTANT in absolute units (it was
     # ~1/sqrt(N) under the old unit-norm scaling -- see radius.py docstring).
     print(f"\n[vario] N-invariance of the range (subsampled training pool):")
-    print(f"{'n_train':>9}{'range':>11}{'2*range':>11}")
+    print(f"{'n_train':>9}{'range':>11}")
     rng2 = np.random.default_rng(0)
     n = len(Z)
     for m in sorted({max(500, n // 4), n // 2, n}):
@@ -315,8 +320,7 @@ def run_variogram(args, E):
         cat_sub = cat[sub] if cat is not None else None
         _, r_m = _variogram_range(Z[sub], y[sub], cat_sub, args)
         rs = f"{r_m:.5f}" if r_m is not None else "  n/a"
-        r2s = f"{2*r_m:.5f}" if r_m is not None else "  n/a"
-        print(f"{m:>9,}{rs:>11}{r2s:>11}")
+        print(f"{m:>9,}{rs:>11}")
     print(f"[vario] a ~constant absolute range across n confirms the radius transfers "
           f"across N -> pick it once (percentile no longer needed for SIGNAL).")
 
@@ -380,10 +384,12 @@ def run_radius(args, E):
         flag = "yes" if ratio < 0.9 else ("~" if ratio < 1.0 else "NO (>= mean)")
         print(f"{i:>4}{100*f:>6.0f}%{d:>13.5f}{r:>9.3f}{ratio:>11.2f}  {flag}")
 
-    n_good = int((curve["bin_rmse"] < base).sum())
-    print(f"\n[radius] {n_good}/{len(curve['bin_rmse'])} bins beat the baseline. "
-          f"Per-bin RMSE is noisy (each bin is only nte/{args.nbins} points), so the "
-          f"radius below comes from the CUMULATIVE curve:")
+    n_good = int((curve["bin_rmse"] < 0.9 * base).sum())
+    print(f"\n[radius] {n_good}/{len(curve['bin_rmse'])} bins are informative "
+          f"(RMSE < 0.9*baseline). R_inf below is the per-bin cliff at 0.9*baseline on a "
+          f"median-smoothed profile (each bin is only nte/{args.nbins} points). The "
+          f"CUMULATIVE curve (shown for context) stays low well past the cliff because "
+          f"near points dominate the aggregate -- it is NOT used for the radius:")
     print(f"{'nn-dist <=':>12}{'% test':>8}{'cum RMSE':>10}{'/base':>8}")
     for d, c in zip(curve["cum_nn"], curve["cum_rmse"]):
         pc = 100 * float(np.mean(nn_now <= d))
@@ -423,27 +429,28 @@ def run_radius(args, E):
         print("[radius] this --n; rerun at --n 20000 before concluding anything.)")
         return
 
-    # 2. express the radius as a percentile -- the scale-free, transferable form
+    # 2. the recommended cutoff IS R_inf (no multiplier). The scale is N-invariant now,
+    #    so use the absolute radius directly via --cutoff.
     dp = pdist(Z_tr[: min(2500, ntr)])
     pct_inf = float(percentileofscore(dp, R_inf))
-    pct_2inf = float(percentileofscore(dp, 2.0 * R_inf))
     inside = frac_within(nn_now, R_inf)
     print(f"\n[radius] informative radius R_inf = {R_inf:.5f} (embedding units)")
     print(f"[radius]   = the {pct_inf:.3f}th percentile of pairwise distances "
-          f"(percentile is the scale-free, transferable form)")
+          f"(the absolute value transfers across N; percentile shown for context)")
     print(f"[radius]   {100*inside:.1f}% of test molecules are inside it at ntr={ntr:,}; "
           f"the other {100*(1-inside):.1f}% are predicted WORSE than the mean.")
-    # Do NOT set cutoff = R_inf. The Wendland tapers INSIDE the cutoff -- psi(0.5)
-    # = 0.19, psi(0.75) = 0.04 -- so with cutoff = R_inf a neighbour sitting at
-    # R_inf gets exactly zero weight and one at R_inf/2 only 19%, i.e. we would be
-    # discarding neighbours that demonstrably carry signal. Setting cutoff = 2*R_inf
-    # puts psi=0.19 at R_inf and ~0 beyond it: full weight on the near neighbours,
-    # meaningful weight out to the edge of the informative zone, negligible past it.
-    print(f"\n[radius]   -> --cutoff-pct {pct_2inf:.2f}   (cutoff = 2*R_inf = "
-          f"{2*R_inf:.5f})")
-    print(f"[radius]      The Wendland tapers inside the cutoff (psi(0.5)=0.19), so")
-    print(f"[radius]      cutoff=R_inf (pct {pct_inf:.2f}) would zero out neighbours that")
-    print(f"[radius]      still carry signal. 2*R_inf places psi=0.19 exactly at R_inf.")
+    # Cutoff = R_inf, no multiplier: R_inf is where neighbours stop carrying signal, so
+    # the Wendland tapering to zero exactly there is the intended behaviour -- it
+    # EXCLUDES the poorly-correlated points (Marcus's guidance) and keeps the kernel as
+    # sparse / well-conditioned as possible. The Wendland does down-weight the mid-range
+    # (psi(0.5)=0.19), so if you want more weight out toward R_inf, just raise --cutoff a
+    # little and re-check R^2 + conditioning -- do NOT bake in a fixed 2x multiplier
+    # (that pulls the poorly-correlated (R_inf, 2*R_inf) shell back in and roughly
+    # quadruples the neighbour count).
+    print(f"\n[radius]   -> --cutoff {R_inf:.5f}   (= R_inf, no multiplier; overrides "
+          f"--cutoff-pct)")
+    print(f"[radius]      Adjust upward only if a sweep shows higher R^2 without wrecking")
+    print(f"[radius]      conditioning (cutoff.sparsity_report at the chosen radius).")
 
     # 3. how fast does nn-distance shrink as the train set grows? (embedding FIXED,
     #    so this isolates density from any change in the representation)

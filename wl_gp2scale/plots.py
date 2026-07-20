@@ -32,8 +32,9 @@ def _path(name: str, out_dir: str) -> str:
     return os.path.join(out_dir, f"{name}-{ts}.png")
 
 
-def plot_semivariogram(lag, gamma, sill, range_, out_dir="diagnostics",
-                       subtitle="", name="semivariogram"):
+def plot_semivariogram(
+    lag, gamma, sill, range_, out_dir="diagnostics", subtitle="", name="semivariogram"
+):
     """Empirical gamma(h) with sill (dashed) and effective range (vertical) marked."""
     lag = np.asarray(lag, float)
     gamma = np.asarray(gamma, float)
@@ -42,11 +43,13 @@ def plot_semivariogram(lag, gamma, sill, range_, out_dir="diagnostics",
     fig, ax = plt.subplots(figsize=(7, 4.5))
     ax.plot(lag, gamma, "o-", color="#2b6cb0", lw=1.5, ms=5, label=r"$\gamma(h)$")
     if np.isfinite(sill) and sill > 0:
-        ax.axhline(sill, ls="--", color="#718096", lw=1.2,
-                   label=f"sill = Var(y) = {sill:.3g}")
+        ax.axhline(
+            sill, ls="--", color="#718096", lw=1.2, label=f"sill = Var(y) = {sill:.3g}"
+        )
     if range_ is not None:
-        ax.axvline(range_, ls=":", color="#c53030", lw=1.5,
-                   label=f"range = {range_:.4f}")
+        ax.axvline(
+            range_, ls=":", color="#c53030", lw=1.5, label=f"range = {range_:.4f}"
+        )
     ax.set_xlabel("embedding distance  h")
     ax.set_ylabel(r"semivariance  $\gamma(h)=\frac{1}{2}\langle(y_i-y_j)^2\rangle$")
     title = "Semivariogram of the target over embedding distance"
@@ -54,7 +57,7 @@ def plot_semivariogram(lag, gamma, sill, range_, out_dir="diagnostics",
     ax.legend(fontsize=8)
     ax.margins(x=0.02)
     fig.tight_layout()
-    fig.savefig(path, dpi=130)
+    fig.savefig(path, dpi=300)
     plt.close(fig)
     return path
 
@@ -71,13 +74,26 @@ def plot_rmse_vs_nn(curve, out_dir="diagnostics", subtitle="", name="rmse_vs_nn"
     fig, ax = plt.subplots(figsize=(7, 4.5))
     ax.plot(med, rms, "o-", color="#2b6cb0", lw=1.5, ms=5, label="per-bin RMSE")
     if len(curve.get("cum_nn", [])):
-        ax.plot(curve["cum_nn"], curve["cum_rmse"], "s--", color="#805ad5",
-                lw=1.2, ms=4, label="cumulative RMSE")
-    ax.axhline(base, ls="--", color="#718096", lw=1.2,
-               label=f"baseline (predict mean) = {base:.3g}")
+        ax.plot(
+            curve["cum_nn"],
+            curve["cum_rmse"],
+            "s--",
+            color="#805ad5",
+            lw=1.2,
+            ms=4,
+            label="cumulative RMSE",
+        )
+    ax.axhline(
+        base,
+        ls="--",
+        color="#718096",
+        lw=1.2,
+        label=f"baseline (predict mean) = {base:.3g}",
+    )
     if R_inf is not None:
-        ax.axvline(R_inf, ls=":", color="#c53030", lw=1.5,
-                   label=f"$R_{{inf}}$ = {R_inf:.4f}")
+        ax.axvline(
+            R_inf, ls=":", color="#c53030", lw=1.5, label=f"$R_{{inf}}$ = {R_inf:.4f}"
+        )
     ax.set_xlabel("distance to nearest training neighbour")
     ax.set_ylabel("test RMSE")
     title = "Prediction error vs nearest-neighbour distance"
@@ -85,6 +101,6 @@ def plot_rmse_vs_nn(curve, out_dir="diagnostics", subtitle="", name="rmse_vs_nn"
     ax.legend(fontsize=8)
     ax.margins(x=0.02)
     fig.tight_layout()
-    fig.savefig(path, dpi=130)
+    fig.savefig(path, dpi=300)
     plt.close(fig)
     return path

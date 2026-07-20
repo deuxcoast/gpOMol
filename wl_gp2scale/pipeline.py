@@ -35,6 +35,9 @@ class WLGPPipeline:
     pls_components: int = 10
     scaling: str = "pareto"  # SparsePLS column pre-weighting (grid-chosen; see reduce)
     cutoff_percentile: float = 25.0
+    cutoff_abs: float = None  # absolute compact-support radius; if set, OVERRIDES the
+                              # percentile (the scale is now N-invariant, so an absolute
+                              # radius from the variogram/R_inf transfers across N)
     vocab_sample: int = 0  # 0 = fit vocab on ALL train (no OOV); >0 = stratified cap
     cutoff_mult: float = 1.2
     # fitted state
@@ -73,9 +76,18 @@ class WLGPPipeline:
         ).fit(X_tr, y)
         Z_tr = self.reducer.transform(X_tr)
         self.dim_ = Z_tr.shape[1]
-        self.cutoff_, _ = recalibrate(
-            Z_tr, percentile=self.cutoff_percentile, dim=self.dim_
-        )
+        if self.cutoff_abs is not None:
+            self.cutoff_ = float(self.cutoff_abs)
+            from scipy.spatial.distance import pdist
+            from scipy.stats import percentileofscore
+            samp = Z_tr[: min(2500, len(Z_tr)), : self.dim_]
+            pct = float(percentileofscore(pdist(samp), self.cutoff_))
+            print(f"[pipe] using ABSOLUTE cutoff {self.cutoff_:.5f} "
+                  f"(~{pct:.2f}th pairwise-distance pctile here; --cutoff-pct ignored)")
+        else:
+            self.cutoff_, _ = recalibrate(
+                Z_tr, percentile=self.cutoff_percentile, dim=self.dim_
+            )
         return Z_tr
 
     def transform(self, atoms, client=None, chunk=500):
