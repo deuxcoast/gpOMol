@@ -110,17 +110,23 @@ def sparsity(Z, cutoff, dim, data_id=None):
 # ----------------------------- 4: streaming-PLS parity ---------------------
 
 
-def streaming_pls_parity(X_tr, y_tr, X_te, y_te, n_components=10, tol=0.02):
+def streaming_pls_parity(X_tr, y_tr, X_te, y_te, n_components=10, tol=0.02,
+                         scaling="pareto"):
     """Assert streaming SIMPLS embedding R^2 matches batch PLSRegression on a small
-    slice (dense reference allowed here). Gate for the 200k reduction."""
-    spls = SparsePLS(n_components=n_components).fit(X_tr, y_tr)
+    slice (dense reference allowed here). Gate for the 200k reduction. ``scaling``
+    must match the production SparsePLS scaling on BOTH sides or the comparison is
+    between two different embeddings."""
+    spls = SparsePLS(n_components=n_components, scaling=scaling).fit(X_tr, y_tr)
     Z_tr, Z_te = spls.transform(X_tr), spls.transform(X_te)
     r2_stream = regression_r2(Z_tr, y_tr, Z_te, y_te)
-    r2_batch_emb, r2_batch_pls = batch_pls_r2(X_tr, y_tr, X_te, y_te, n_components)
+    r2_batch_emb, r2_batch_pls = batch_pls_r2(
+        X_tr, y_tr, X_te, y_te, n_components, scaling=scaling
+    )
     ok = abs(r2_stream - r2_batch_emb) < tol
     print(
-        f"[val] PLS parity: streaming R²={r2_stream:.4f} vs batch R²={r2_batch_emb:.4f} "
-        f"(sklearn .score={r2_batch_pls:.4f}) -> {'PASS' if ok else 'FAIL'}"
+        f"[val] PLS parity [{scaling}]: streaming R²={r2_stream:.4f} vs batch "
+        f"R²={r2_batch_emb:.4f} (sklearn .score={r2_batch_pls:.4f}) -> "
+        f"{'PASS' if ok else 'FAIL'}"
     )
     return {
         "r2_streaming": r2_stream,
