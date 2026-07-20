@@ -18,14 +18,20 @@ decision-relevant number we have:
      the good one. So "does 200k help?" becomes the much cheaper question "does
      P(nn-dist < R_inf) rise enough?" -- which needs no GP at 200k at all.
 
-UNITS WARNING. Our embedding is NOT in descriptor_eval's units, so the ~1.8 seen
-in that plot cannot be read across. SIMPLS normalises every score column to unit
-norm, so our embedding scales as ~1/sqrt(N) (median pairwise distance measured at
-0.095 for n=2000 vs 0.048 for n=8000 -- exactly sqrt(4)), while sklearn's PLS
-scores have an N-independent scale (~4.3 at both). Ours are ~100x smaller at 16k
-and ~350x at 196k. Everything here is therefore ALSO reported as a percentile of
-the pairwise-distance distribution, which is invariant to that rescaling and is
-what transfers across N.
+Scale is now N-INVARIANT (historical note). This module was written when SparsePLS
+normalised every score column to unit norm, so the embedding scaled as ~1/sqrt(N)
+(median pairwise distance 0.095 at n=2000 vs 0.048 at n=8000 -- exactly sqrt(4)) and
+an absolute radius could NOT be read across N. We therefore reported everything as a
+percentile of the pairwise-distance distribution. That normalisation has since been
+removed (natural + pareto scaling in reduce.py): var(t_a)=w_a^T Cov(Xtilde) w_a is a
+population quantity, so the embedding scale -- and hence an absolute radius -- now
+TRANSFERS across N. Absolute distances are the primary form here; the percentile is
+retained only as a density / conditioning guard (it still tracks neighbour count,
+which scales with N regardless of the absolute scale).
+
+The semivariogram below picks that absolute radius directly from data (gamma(h)
+reaching its sill = the correlation length beyond which neighbours carry no signal),
+independently of and as a cross-check on the RMSE-vs-nn-distance informative radius.
 """
 
 from __future__ import annotations
@@ -175,3 +181,84 @@ def frac_within(nn_dist, radius):
     if radius is None:
         return float("nan")
     return float(np.mean(np.asarray(nn_dist, float) <= radius))
+
+
+# ----------------------------- semivariogram -------------------------------
+
+
+def semivariogram(Z, y, sample=5000, n_bins=20, cat=None, seed=0):
+    """Empirical semivariogram of the target y over embedding distance.
+
+    gamma(h) = 0.5 * < (y_i - y_j)^2 >  binned by pairwise embedding distance h.
+    Since gamma(inf) = Var(y) for independent pairs, the distance where gamma reaches
+    the sill (= Var(y)) is the correlation length -- beyond it neighbours carry no
+    usable signal, so it is the natural compact-support radius. GP-free and cheap:
+    one pdist over a ``sample``-row subset (5000 rows -> ~1.25e7 pairs).
+
+    ``cat``: if given, only SAME-category pairs are kept -- faithful to the kernel,
+    which zeroes cross-category covariance, so the relevant sill is the within-category
+    variance the kernel actually sees (<= total Var(y)).
+
+    Returns dict: ``lag`` (per-bin median distance), ``gamma`` (per-bin semivariance),
+    ``count`` (pairs per bin), ``sill`` (Var(y), or within-category variance if masked),
+    ``n_pairs``.
+    """
+    from scipy.spatial.distance import pdist
+
+    Z = np.asarray(Z, dtype=float)
+    y = np.asarray(y, dtype=float).ravel()
+    rng = np.random.default_rng(seed)
+    m = min(sample, len(Z))
+    idx = rng.choice(len(Z), size=m, replace=False)
+    Zs, ys = Z[idx], y[idx]
+
+    d = pdist(Zs)                                  # (m*(m-1)/2,) pairwise distances
+    dy = pdist(ys[:, None])                        # |y_i - y_j| for the same pairs
+    sv = 0.5 * dy**2                               # per-pair semivariance
+
+    if cat is not None:
+        cats = np.asarray(cat)[idx]
+        same = pdist(cats[:, None]) == 0           # 0 iff i,j share a category
+        d, sv = d[same], sv[same]
+        # gamma plateau for within-category (independent) pairs is the within-category
+        # variance, which the mean semivariance over same-category pairs estimates
+        # (0.5*mean(dy^2) = Var_within when pairs decorrelate). <= total Var(y).
+        sill = float(np.mean(sv)) if len(sv) else float("nan")
+    else:
+        sill = float(np.var(y))                     # exact gamma(inf) over all pairs
+
+    if len(d) == 0:
+        return {"lag": np.array([]), "gamma": np.array([]), "count": np.array([]),
+                "sill": sill, "n_pairs": 0}
+
+    edges = np.percentile(d, np.linspace(0, 100, n_bins + 1))
+    lag, gamma, count = [], [], []
+    for b in range(n_bins):
+        lo, hi = edges[b], edges[b + 1]
+        sel = ((d >= lo) & (d <= hi)) if b == n_bins - 1 else ((d >= lo) & (d < hi))
+        if sel.sum() == 0:
+            continue
+        lag.append(float(np.median(d[sel])))
+        gamma.append(float(np.mean(sv[sel])))
+        count.append(int(sel.sum()))
+    return {
+        "lag": np.array(lag), "gamma": np.array(gamma), "count": np.array(count),
+        "sill": sill, "n_pairs": int(len(d)),
+    }
+
+
+def range_from_variogram(lag, gamma, sill, sill_frac=0.95):
+    """Effective range: the smallest lag at which gamma reaches ``sill_frac`` * sill.
+
+    Model-free (no covariance-model fit). Returns None if gamma never reaches the
+    threshold within the sampled distances (no decorrelation observed -> the radius is
+    larger than the data resolves, or the signal is representational not spatial).
+    A scipy.optimize.curve_fit spherical/exponential-model range is a drop-in
+    refinement if a smoother estimate is wanted.
+    """
+    lag = np.asarray(lag, float)
+    gamma = np.asarray(gamma, float)
+    if lag.size == 0 or not np.isfinite(sill) or sill <= 0:
+        return None
+    hit = np.where(gamma >= sill_frac * sill)[0]
+    return float(lag[hit[0]]) if hit.size else None

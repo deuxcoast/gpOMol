@@ -65,7 +65,8 @@ import numpy as np
 def build_argparser():
     ap = argparse.ArgumentParser(
         description="gp2Scale diagnostics: bisect / cutoff sweep / informative radius")
-    ap.add_argument("--mode", choices=["bisect", "sweep", "radius"], default="bisect")
+    ap.add_argument("--mode", choices=["bisect", "sweep", "radius", "variogram"],
+                    default="bisect")
     ap.add_argument("--src", default="train_4M")
     ap.add_argument("--n", type=int, default=6000, help="molecules to load")
     ap.add_argument("--seed", type=int, default=0)
@@ -95,6 +96,24 @@ def build_argparser():
     ap.add_argument("--nn-sizes", default="",
                     help="radius mode: comma-separated train sizes for the nn-distance "
                          "scaling fit; default is a log ladder up to the full split")
+    # variogram-only (also used for the cross-check in radius mode)
+    ap.add_argument("--vario-sample", type=int, default=5000,
+                    help="variogram: rows to subsample for the pairwise semivariance")
+    ap.add_argument("--vario-bins", type=int, default=20,
+                    help="variogram: number of equal-count distance bins")
+    ap.add_argument("--sill-frac", type=float, default=0.95,
+                    help="variogram: gamma/sill fraction defining the effective range")
+    ap.add_argument("--same-cat", dest="same_cat", action="store_true", default=True,
+                    help="variogram: use only same-category pairs (default; faithful "
+                         "to the block kernel)")
+    ap.add_argument("--no-same-cat", dest="same_cat", action="store_false",
+                    help="variogram: use all pairs regardless of category")
+    ap.add_argument("--plot-dir", default="diagnostics",
+                    help="directory for PNG plots (variogram/radius modes)")
+    ap.add_argument("--no-plot", dest="plot", action="store_false", default=True,
+                    help="skip writing PNG plots")
+    ap.add_argument("--out", default=None,
+                    help="variogram mode: optional .npz of the curve arrays")
     return ap
 
 
@@ -207,6 +226,116 @@ def run_sweep(args, E):
 # --------------------------------------------------------------- radius mode
 
 
+# ------------------------------------------------------------- variogram mode
+
+
+def _variogram_range(Z, y, cat, args):
+    """Semivariogram + effective range on one embedding. Returns (curve, range)."""
+    from .radius import range_from_variogram, semivariogram
+
+    vg = semivariogram(Z, y, sample=args.vario_sample, n_bins=args.vario_bins,
+                       cat=cat, seed=0)
+    rng = range_from_variogram(vg["lag"], vg["gamma"], vg["sill"],
+                               sill_frac=args.sill_frac)
+    return vg, rng
+
+
+def run_variogram(args, E):
+    """GP-FREE radius picker: semivariogram of y over embedding distance -> the
+    correlation length (range) where gamma reaches the sill. Ties that SIGNAL radius
+    to kernel CONDITIONING via sparsity_report, and shows the absolute range is
+    N-invariant (the justification for retiring per-N --cutoff-pct for signal)."""
+    from .cutoff import sparsity_report
+
+    Z, y = E["Z_tr_full"], E["y_tr_full"]
+    cat = E["cat_tr_full"] if args.same_cat else None
+    dim = E["dim"]
+    tag = "same-category pairs" if args.same_cat else "all pairs"
+
+    vg, rng = _variogram_range(Z, y, cat, args)
+    sill = vg["sill"]
+    print(f"\n[vario] semivariogram on {len(Z):,} train molecules, {tag}, "
+          f"{args.vario_sample} sampled rows ({vg['n_pairs']:,} pairs), "
+          f"dim={dim}")
+    print(f"[vario] sill (gamma plateau) = {sill:.3f}   "
+          f"(total Var(y) = {np.var(y):.3f})")
+    hdr = f"{'lag h':>11}{'gamma(h)':>11}{'gamma/sill':>12}{'pairs':>12}"
+    print(hdr); print("-" * len(hdr))
+    for h, g, c in zip(vg["lag"], vg["gamma"], vg["count"]):
+        print(f"{h:>11.5f}{g:>11.3f}{g/sill:>12.3f}{c:>12,}")
+
+    if rng is None:
+        print(f"\n[vario] gamma never reaches {args.sill_frac:.0%} of the sill within "
+              f"the sampled distances -> no decorrelation resolved. The correlation "
+              f"length is larger than the data spans (or the signal is representational,"
+              f" not spatial). Rerun at larger --n or inspect the curve/plot.")
+    else:
+        print(f"\n[vario] effective RANGE = {rng:.5f} embedding units "
+              f"(gamma reaches {args.sill_frac:.0%} of sill here).")
+        print(f"[vario]   Nominal compact-support radius; the Wendland tapers INSIDE the")
+        print(f"[vario]   cutoff (psi(0.5)=0.19), so the honest support is")
+        print(f"[vario]   cutoff = 2*range = {2*rng:.5f} (psi=0.19 at the range).")
+
+    # Trend / non-stationarity check. A supervised PLS embedding orients y linearly
+    # along the leading axes, so y is NON-stationary in embedding space: the variogram
+    # keeps rising past the sill instead of plateauing, and the range over-estimates
+    # the LOCAL predictive radius. Flag it so the range is not over-trusted.
+    overshoot = float(np.max(vg["gamma"])) / sill if sill > 0 else float("nan")
+    if overshoot > 1.5:
+        print(f"\n[vario] NOTE: gamma overshoots the sill ({overshoot:.1f}x at the far "
+              f"lag) -> y has a TREND in the embedding (expected: PLS orients y linearly "
+              f"along the leading axes). The variogram does not cleanly plateau, so the "
+              f"range OVER-estimates the local predictive radius. Cross-check with "
+              f"`--mode radius` (RMSE-cliff R_inf is the more reliable cutoff basis "
+              f"here), or run the variogram on the OLS-detrended residual for a clean "
+              f"local range.")
+
+        # tie the SIGNAL radius to CONDITIONING: density / neighbours at each candidate
+        for label, R in [("range", rng), ("2*range (recommended cutoff)", 2 * rng)]:
+            print(f"\n[vario] kernel density at cutoff={R:.5f} ({label}):")
+            rep = sparsity_report(Z, R, dim=dim, data_id=cat)
+            med = rep["median_neighbors"]
+            if med > 200:
+                print(f"[vario]   median {med:.0f} in-support neighbours is HIGH -> the "
+                      f"signal radius is denser than is well-conditioned; consider the "
+                      f"density-capped radius (--cutoff-pct) as the binding constraint.")
+            elif med < 10:
+                print(f"[vario]   median {med:.0f} in-support neighbours is LOW -> risk of "
+                      f"mean reversion; this radius may be too tight for good coverage.")
+
+    # N-invariance: recompute the range on subsamples of the training pool. Under the
+    # current natural+pareto scaling this should be ~CONSTANT in absolute units (it was
+    # ~1/sqrt(N) under the old unit-norm scaling -- see radius.py docstring).
+    print(f"\n[vario] N-invariance of the range (subsampled training pool):")
+    print(f"{'n_train':>9}{'range':>11}{'2*range':>11}")
+    rng2 = np.random.default_rng(0)
+    n = len(Z)
+    for m in sorted({max(500, n // 4), n // 2, n}):
+        sub = rng2.choice(n, size=m, replace=False)
+        cat_sub = cat[sub] if cat is not None else None
+        _, r_m = _variogram_range(Z[sub], y[sub], cat_sub, args)
+        rs = f"{r_m:.5f}" if r_m is not None else "  n/a"
+        r2s = f"{2*r_m:.5f}" if r_m is not None else "  n/a"
+        print(f"{m:>9,}{rs:>11}{r2s:>11}")
+    print(f"[vario] a ~constant absolute range across n confirms the radius transfers "
+          f"across N -> pick it once (percentile no longer needed for SIGNAL).")
+
+    if args.plot:
+        from . import plots
+        sub = (f"{tag}, n={len(Z):,}, sill={sill:.2f}"
+               + (f", range={rng:.4f}" if rng is not None else ""))
+        p = plots.plot_semivariogram(vg["lag"], vg["gamma"], sill, rng,
+                                     out_dir=args.plot_dir, subtitle=sub)
+        print(f"\n[vario] wrote {p}")
+    if args.out:
+        np.savez(args.out, lag=vg["lag"], gamma=vg["gamma"], count=vg["count"],
+                 sill=sill, range=(np.nan if rng is None else rng))
+        print(f"[vario] wrote {args.out}")
+
+
+# ---------------------------------------------------------------- radius mode
+
+
 def run_radius(args, E):
     """Informative radius + a density-only prediction of R^2 at --target-n."""
     from scipy.linalg import cho_factor, cho_solve
@@ -261,6 +390,30 @@ def run_radius(args, E):
         print(f"{d:>12.5f}{pc:>7.0f}%{c:>10.3f}{c/base:>8.2f}")
 
     R_inf = curve["radius"]
+
+    # cross-check R_inf against the GP-FREE semivariogram range: two estimates of one
+    # correlation length (a-posteriori error cliff vs a-priori signal decorrelation).
+    _vg, vg_rng = _variogram_range(
+        E["Z_tr_full"], E["y_tr_full"],
+        E["cat_tr_full"] if args.same_cat else None, args)
+    _ratio = (vg_rng / R_inf) if (vg_rng and R_inf) else None
+    print(f"\n[radius] cross-check: semivariogram range = "
+          f"{'n/a' if vg_rng is None else f'{vg_rng:.5f}'} (a-priori, pairwise "
+          f"y-decorrelation)  vs  RMSE-cliff R_inf = "
+          f"{'n/a' if R_inf is None else f'{R_inf:.5f}'} (a-posteriori, local "
+          f"predictive radius).")
+    if _ratio and _ratio > 2.0:
+        print(f"[radius]   range is {_ratio:.1f}x R_inf -> y is NON-stationary (a trend "
+              f"in the embedding, expected from supervised PLS), so the variogram range "
+              f"over-estimates the local radius. Trust R_inf for the cutoff here.")
+
+    if args.plot:
+        from . import plots
+        p = plots.plot_rmse_vs_nn(
+            curve, out_dir=args.plot_dir,
+            subtitle=f"ntr={ntr}, dim={dim}, cutoff={cut:.4f}")
+        print(f"[radius] wrote {p}")
+
     if R_inf is None:
         print("\n[radius] Even the nearest test points do not beat 0.9*baseline -> the")
         print("[radius] error is flat in neighbour distance. That is REPRESENTATIONAL,")
@@ -422,6 +575,8 @@ def main():
         run_sweep(args, E)
     elif args.mode == "radius":
         run_radius(args, E)
+    elif args.mode == "variogram":
+        run_variogram(args, E)
     else:
         run_bisect(args, E)
 
