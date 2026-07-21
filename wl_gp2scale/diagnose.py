@@ -75,6 +75,9 @@ def build_argparser():
                     help="2 matches descriptor_eval/gp_parity.py")
     ap.add_argument("--depth", type=int, default=3)
     ap.add_argument("--pls", type=int, default=10)
+    ap.add_argument("--scaling", default="pareto",
+                    choices=["pareto", "standard", "center"],
+                    help="SparsePLS column pre-weighting (default pareto)")
     ap.add_argument("--cutoff-pct", type=float, default=25.0,
                     help="bisect mode: the cutoff percentile to test at")
     ap.add_argument("--cutoff", type=float, default=None,
@@ -133,7 +136,7 @@ def _load_embedding(args):
 
     pipe = WLGPPipeline(depth=args.depth, min_count=args.min_count,
                         pls_components=args.pls, cutoff_percentile=args.cutoff_pct,
-                        cutoff_abs=args.cutoff)
+                        cutoff_abs=args.cutoff, scaling=args.scaling)
     Z_tr = pipe.fit([ds.atoms[i] for i in tr], ds.y[tr], ds.data_id[tr], client=None)
     Z_te = pipe.transform([ds.atoms[i] for i in te], client=None)
 
