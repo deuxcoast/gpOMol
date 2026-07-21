@@ -31,6 +31,7 @@ across dims, so the per-dim median-neighbour line is printed to keep that visibl
 from __future__ import annotations
 
 import argparse
+import time
 
 import numpy as np
 
@@ -70,15 +71,21 @@ def _one_gp_r2(Z_tr, y_tr, cat_tr, Z_te, y_te, cat_te, cutoff, dim, client, args
     Xte = with_category_tag(Zte_d, cat_te)
     sv = float(np.var(y_fit))                       # signal var of what the GP models
 
+    t0 = time.time()
     gp, _ = build_gp(
         Xtr, y_fit_s, cutoff, dim, client,
         signal_var=sv, jitter=args.jitter, batch_size=args.batch_size,
         compute_device="cpu", device=args.device, linalg_mode=args.linalg,
+        cg_maxiter=args.cg_maxiter, cg_tol=args.cg_tol,
     )
+    t_build = time.time() - t0                       # kernel build + logdet + KVinvY solve
+    t1 = time.time()
     m, _ = predict(gp, Xte, batch=args.pred_batch, variance=False)
+    t_pred = time.time() - t1
     if mean is not None:
         m = m + mean.predict(Zte_d)                 # add the linear mean back (Eq. 2)
     r2 = float(r2_score(y_te, m))
+    print(f"[sweep]   timing: build(+solve+logdet)={t_build:.1f}s  predict={t_pred:.1f}s")
     del gp
     release_gp(client)
     return r2
@@ -188,6 +195,11 @@ def main():
     ap.add_argument("--batch-size", type=int, default=10_000)
     ap.add_argument("--pred-batch", type=int, default=2000)
     ap.add_argument("--linalg", default="sparseCG")
+    ap.add_argument("--cg-maxiter", type=int, default=None,
+                    help="cap CG iterations so an ill-conditioned split fails fast "
+                         "(fvgp warns 'CG not successful') instead of grinding")
+    ap.add_argument("--cg-tol", type=float, default=None,
+                    help="CG relative tolerance (fvgp sparse_cg_tol; default 1e-5)")
     ap.add_argument("--device", default="cuda", help="OUR kernel's torch device")
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--scheduler-file", default=None)

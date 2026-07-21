@@ -222,6 +222,9 @@ def build_gp(
     dtype="float64",
     cutoff_is_hp=False,
     logdet_rtol=0.5,
+    cg_maxiter=None,
+    cg_tol=None,
+    logdet_verbose=False,
     args=None,
 ):
     """Construct the gp2Scale GPOptimizer with the sparse GPU block kernel.
@@ -273,6 +276,17 @@ def build_gp(
     # under --train, which actually uses the value.
     _args = dict(args or {})
     _args.setdefault("random_logdet_error_rtol", float(logdet_rtol))
+    # Solve instrumentation / fail-fast. sparse_cg_maxiter caps CG so an ill-conditioned
+    # split fails fast (fvgp warns "CG not successful") instead of grinding for 20 min;
+    # sparse_cg_tol is the CG rtol; the logdet-verbose flags surface the stochastic-
+    # Lanczos progress. All are fvgp `args` keys (fvgp/gp_lin_alg.py).
+    if cg_maxiter is not None:
+        _args.setdefault("sparse_cg_maxiter", int(cg_maxiter))
+    if cg_tol is not None:
+        _args.setdefault("sparse_cg_tol", float(cg_tol))
+    if logdet_verbose:
+        _args.setdefault("random_logdet_verbose", True)
+        _args.setdefault("random_logdet_print_info", True)
 
     gp = GPOptimizer(
         x_data=np.asarray(X_tr, float),
