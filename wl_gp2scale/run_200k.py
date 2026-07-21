@@ -69,6 +69,9 @@ def build_argparser():
                     help="absolute compact-support radius (embedding units); OVERRIDES "
                          "--cutoff-pct. The embedding scale is N-invariant, so a radius "
                          "picked once (variogram/R_inf) transfers across N.")
+    ap.add_argument("--prior-mean", default="none", choices=["none", "linear"],
+                    help="GP prior mean: 'linear' fits OLS on the embedding, GPs the "
+                         "residual, adds it back (gp2Scale Eq. 2; fixes mean reversion)")
     ap.add_argument("--vocab-sample", type=int, default=0,
                     help="0 = fit WL vocab on ALL train molecules (recommended: no "
                          "train OOV, no dropped signal). >0 caps it to a stratified "
@@ -151,10 +154,22 @@ def main():
     cutoff = pipe.cutoff_
     dim = pipe.dim_
 
+    # optional linear prior mean (gp2Scale Eq. 2 with linear m): the GP models the
+    # residual y - m(z) and predictions add m(z*) back, so uncovered test points revert
+    # to the OLS prediction instead of 0 (fixes compact-support mean reversion).
+    if args.prior_mean == "linear":
+        from .reduce import LinearEmbeddingMean
+        emean = LinearEmbeddingMean().fit(Z_tr, y_tr)
+        y_fit = y_tr - emean.predict(Z_tr)
+        print(f"[run] linear prior mean: GP models residual (var {np.var(y_fit):.4g} "
+              f"vs y var {np.var(y_tr):.4g})")
+    else:
+        emean, y_fit = None, y_tr
+
     # tag with category, sort train into contiguous category blocks
     X_tr = with_category_tag(Z_tr, cat_tr)
     X_te = with_category_tag(Z_te, cat_te)
-    X_tr, y_tr, order = sort_by_category(X_tr, y_tr)
+    X_tr, y_fit, order = sort_by_category(X_tr, y_fit)
 
     # Know the memory bill BEFORE paying it: fvgp gathers every COO component to the
     # DRIVER and builds one scipy CSR there (gp_prior.py:294-306), so this number --
@@ -168,7 +183,7 @@ def main():
     print("[run] building gp2Scale GP (this includes the unavoidable imate logdet) ...")
     t_gp = time.time()
     gp, kern = build_gp(
-        X_tr, y_tr, cutoff, dim, client,
+        X_tr, y_fit, cutoff, dim, client,
         signal_var=args.signal_var, jitter=args.jitter, batch_size=args.batch_size,
         backend=args.backend, linalg_mode=args.linalg,
         compute_device=args.compute_device,
@@ -179,7 +194,7 @@ def main():
           f"(kernel assembly + logdet + KVinvY solve)")
 
     if args.train:
-        sv0 = float(args.signal_var or np.var(y_tr))
+        sv0 = float(args.signal_var or np.var(y_fit))
         bounds = np.array([[1e-3, max(10 * sv0, 1e-2)]])
         print("[run] marginal-likelihood training (requires imate) ...")
         hps = train_hyperparameters(gp, bounds, max_iter=50)
@@ -193,6 +208,8 @@ def main():
               f"{len(y_tr):,}-point system; {len(X_te):,} test points may take "
               f"hours. Consider --no-variance or a smaller --test-size.")
     m, v = predict(gp, X_te, batch=args.predict_batch, variance=want_var, verbose=True)
+    if emean is not None:
+        m = m + emean.predict(Z_te)              # add the linear mean back (Eq. 2)
     E_pred_resid = m
     rmse = float(np.sqrt(np.mean((m - y_te) ** 2)))
     r2 = float(r2_score(y_te, m))
@@ -202,7 +219,8 @@ def main():
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     np.savez(
         args.out, y_true=y_te, y_pred=E_pred_resid, var=v, cutoff=cutoff,
-        r2=r2, rmse=rmse, signal_var=float(args.signal_var or np.var(y_tr)),
+        r2=r2, rmse=rmse, signal_var=float(args.signal_var or np.var(y_fit)),
+        prior_mean=args.prior_mean,
         dim=dim, min_count=args.min_count, depth=args.depth, pls=args.pls,
         cutoff_pct=args.cutoff_pct, category_order=order,
     )
