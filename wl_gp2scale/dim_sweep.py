@@ -48,20 +48,36 @@ def _one_gp_r2(Z_tr, y_tr, cat_tr, Z_te, y_te, cat_te, cutoff, dim, client, args
     so a test molecule tagged with the wrong category draws only on training molecules
     of that wrong category -> its posterior mean collapses to the prior. (Tagging all
     test rows with a single dummy category is only valid when TRAIN uses that same
-    single category, as in validate.sparse_vs_dense_parity.)"""
+    single category, as in validate.sparse_vs_dense_parity.)
+
+    ``--prior-mean linear`` fits an OLS mean on the embedding, has the GP model the
+    residual y - m(z), and adds m(z*) back to the prediction (gp2Scale Eq. 2 with a
+    linear m). This makes uncovered test points revert to the OLS prediction instead
+    of 0, fixing the compact-support mean reversion."""
     from sklearn.metrics import r2_score
 
-    Xtr = with_category_tag(Z_tr[:, :dim], cat_tr)
-    Xtr, y_tr_s, _ = sort_by_category(Xtr, y_tr)
-    Xte = with_category_tag(Z_te[:, :dim], cat_te)
-    sv = float(np.var(y_tr))
+    from .reduce import LinearEmbeddingMean
+
+    Ztr_d, Zte_d = Z_tr[:, :dim], Z_te[:, :dim]
+    if getattr(args, "prior_mean", "none") == "linear":
+        mean = LinearEmbeddingMean().fit(Ztr_d, y_tr)
+        y_fit = y_tr - mean.predict(Ztr_d)          # GP models the residual
+    else:
+        mean, y_fit = None, y_tr
+
+    Xtr = with_category_tag(Ztr_d, cat_tr)
+    Xtr, y_fit_s, _ = sort_by_category(Xtr, y_fit)  # sort residual consistently
+    Xte = with_category_tag(Zte_d, cat_te)
+    sv = float(np.var(y_fit))                       # signal var of what the GP models
 
     gp, _ = build_gp(
-        Xtr, y_tr_s, cutoff, dim, client,
+        Xtr, y_fit_s, cutoff, dim, client,
         signal_var=sv, jitter=args.jitter, batch_size=args.batch_size,
         compute_device="cpu", device=args.device, linalg_mode=args.linalg,
     )
     m, _ = predict(gp, Xte, batch=args.pred_batch, variance=False)
+    if mean is not None:
+        m = m + mean.predict(Zte_d)                 # add the linear mean back (Eq. 2)
     r2 = float(r2_score(y_te, m))
     del gp
     release_gp(client)
@@ -88,6 +104,8 @@ def run(args, client):
     ds = get_data(src=args.src, n=args.n, seed=args.data_seed)
     dims = sorted({int(d) for d in args.dims})
     rows = []
+    print(f"[sweep] config: scaling={args.scaling} prior_mean={args.prior_mean} "
+          f"jitter={args.jitter:g} linalg={args.linalg} dims={dims}")
 
     for seed in args.seeds:
         print(f"\n########## split seed {seed} ##########")
@@ -152,6 +170,9 @@ def main():
     ap.add_argument("--scaling", default="pareto",
                     choices=["pareto", "standard", "center"],
                     help="SparsePLS column pre-weighting (default pareto)")
+    ap.add_argument("--prior-mean", default="none", choices=["none", "linear"],
+                    help="GP prior mean: 'linear' fits OLS on the embedding, GPs the "
+                         "residual, adds it back (gp2Scale Eq. 2; fixes mean reversion)")
     ap.add_argument("--test-size", type=float, default=0.2)
     ap.add_argument("--min-count", type=int, default=2)
     ap.add_argument("--depth", type=int, default=3)

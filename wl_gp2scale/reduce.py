@@ -245,3 +245,44 @@ def batch_pls_r2(X_tr, y_tr, X_te, y_te, n_components=10, scaling="pareto"):
     pls = PLSRegression(n_components=n_components, scale=False).fit(Xs_tr, y_tr)
     Z_tr, Z_te = pls.transform(Xs_tr), pls.transform(Xs_te)
     return regression_r2(Z_tr, y_tr, Z_te, y_te), float(pls.score(Xs_te, y_te))
+
+
+# ----------------------------- linear prior mean ---------------------------
+
+
+@dataclass
+class LinearEmbeddingMean:
+    """OLS linear mean ``m(z) = b0 + b^T z`` on the embedding, for use as a GP PRIOR
+    MEAN (Approach A / "detrend"): the GP models the residual ``y - m(z)`` and
+    predictions add ``m(z*)`` back. This is exactly gp2Scale's posterior-mean equation
+    (Noack et al. 2025, Eq. 2) with a linear m -- means are an explicitly supported
+    gp2Scale customization and are orthogonal to the compact-support/sparse-K machinery
+    (the mean never touches K).
+
+    Why: the compact-support Wendland reverts to the prior mean where a test point has
+    no in-support neighbour. With the default zero mean that is 0 (mean reversion, ~45%
+    of test points here); with a linear mean it reverts to the OLS prediction instead,
+    so the GP inherits the linear/OLS accuracy as a floor and adds local corrections
+    where coverage exists. PLS also bakes a global linear trend into the embedding, so
+    removing it leaves the (near-stationary) residual the compact-support kernel is
+    actually good at -- the use case gp2Scale is designed for.
+
+    Equivalent to passing ``m(z*)`` as fvgp's ``prior_mean_function`` (the "inside the
+    GP" route, needed only when the mean is trained jointly). For frozen-hyperparameter
+    predict the point predictions are identical, and the manual detrend cannot perturb
+    the sparse solve.
+    """
+
+    coef_: np.ndarray = field(default=None, repr=False)   # (d,)
+    intercept_: float = 0.0
+
+    def fit(self, Z, y):
+        Z = np.asarray(Z, dtype=float)
+        y = np.asarray(y, dtype=float).ravel()
+        H = np.hstack([np.ones((len(Z), 1)), Z])
+        beta, *_ = np.linalg.lstsq(H, y, rcond=None)
+        self.intercept_, self.coef_ = float(beta[0]), beta[1:]
+        return self
+
+    def predict(self, Z):
+        return self.intercept_ + np.asarray(Z, dtype=float) @ self.coef_
