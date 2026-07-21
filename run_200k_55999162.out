@@ -1,0 +1,30 @@
+python: /global/homes/c/conorney/.conda/envs/gpomol/bin/python   PYTHONPATH=/pscratch/sd/c/conorney/gpOMol:/global/common/software/nersc9/numba-cuda-580-patch/patch:/opt/nersc/pymon
+scheduler up -> /pscratch/sd/c/conorney/scheduler_file_gpOmol.json
+[data] source has 3,986,754 structures; requesting n=20,000
+[data] reusing cached subset of 20,000 indices
+[data] residual var=50.33 (std 7.095); 10 categories: ['ani2x', 'biomolecules', 'elytes', 'geom_orca6', 'metal_complexes', 'orbnet_denali', 'reactivity', 'rgd', 'spice', 'trans1x']
+[run] train=19,600 test=400
+[run] WARNING: only 400 test points -> R² will be noisy (~+/-0.03-0.05). --test-size defaults to 0.02, tuned for the 200k run; for a small-N baseline pass e.g. --test-size 0.2 to get ~4,000 test points.
+[dask] connected via /pscratch/sd/c/conorney/scheduler_file_gpOmol.json
+[dask] waiting for 16 workers ...
+[dask] 16 workers ready
+[pipe] fitting WL vocab on ALL 19,600 training molecules
+[wl-fit]   vocab scan 5000/19600
+[wl-fit]   vocab scan 10000/19600
+[wl-fit]   vocab scan 15000/19600
+[wl-fit] 550283 raw labels -> 65428 kept (min_count=2) from 19600 sample mols in 37.2s; per-depth {1: 8858, 2: 24479, 3: 32091}
+[wl] transformed (19600, 65428) (nnz=967,553, density=7.54e-04) in 68.3s; OOV 18.3% of occurrences
+[cutoff] sampled pairwise pctiles [5,25,50,75,95]=[0.005 0.01  0.016 0.027 0.052]; CUTOFF@25pct = 0.0102
+[wl] transformed (400, 65428) (nnz=19,027, density=7.27e-04) in 1.7s; OOV 21.1% of occurrences
+[cutoff] est. density=5.034e-02  est. nnz=19,337,795  (~0.2 GB driver-side CSR for the full 19,600x19,600 matrix)
+[cutoff] in-support neighbours/row: median=687 min=1 max=3422 frac_zero=0.0%
+[cutoff] WARNING: dense-ish kernel -> heavy memory / ill-conditioned; LOWER cutoff.
+[run] gp2Scale: 1 batches -> ~1 blocks over 16 workers; driver-side CSR ~0.2 GB (assembly peak roughly 3x that)
+[run] building gp2Scale GP (this includes the unavoidable imate logdet) ...
+[run] GP constructed in 208s (kernel assembly + logdet + KVinvY solve)
+[run] predicting on 400 test points (batch=500, variance=False) ...
+[predict]   400/400
+[run] TEST residual RMSE=6.2527  R²=0.1345  (baseline std 6.7211)
+[run] saved predictions -> cache/preds_20000.npz
+[run] saved parity plot -> cache/preds_20000_parity.png  (elapsed 409s)
+driver exited with code 0; tearing down cluster

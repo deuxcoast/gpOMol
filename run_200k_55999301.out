@@ -1,0 +1,2 @@
+python: /global/homes/c/conorney/.conda/envs/gpomol/bin/python   PYTHONPATH=/pscratch/sd/c/conorney/gpOMol:/global/common/software/nersc9/numba-cuda-580-patch/patch:/opt/nersc/pymon
+scheduler up -> /pscratch/sd/c/conorney/scheduler_file_gpOmol_55999301.json

@@ -1,0 +1,66 @@
+2026-07-16 16:47:12,874 - distributed.scheduler - INFO - -----------------------------------------------
+2026-07-16 16:47:13,463 - distributed.http.proxy - INFO - To route to workers diagnostics web server please install jupyter-server-proxy: python -m pip install jupyter-server-proxy
+2026-07-16 16:47:13,507 - distributed.scheduler - INFO - State start
+2026-07-16 16:47:13,511 - distributed.scheduler - INFO - -----------------------------------------------
+2026-07-16 16:47:13,512 - distributed.scheduler - INFO -   Scheduler at:  tcp://10.249.23.237:8786
+2026-07-16 16:47:13,512 - distributed.scheduler - INFO -   dashboard at:  http://10.249.23.237:8787/status
+2026-07-16 16:47:13,514 - distributed.scheduler - INFO - Registering Worker plugin shuffle
+2026-07-16 16:47:25,349 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.24.16:46461 name: tcp://10.249.24.16:46461
+2026-07-16 16:47:25,429 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.24.16:46461
+2026-07-16 16:47:25,430 - distributed.core - INFO - Starting established connection to tcp://10.249.24.16:54924
+2026-07-16 16:47:25,431 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.24.16:38027 name: tcp://10.249.24.16:38027
+2026-07-16 16:47:25,431 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.24.16:38027
+2026-07-16 16:47:25,431 - distributed.core - INFO - Starting established connection to tcp://10.249.24.16:54940
+2026-07-16 16:47:25,431 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.24.16:38909 name: tcp://10.249.24.16:38909
+2026-07-16 16:47:25,431 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.24.16:38909
+2026-07-16 16:47:25,431 - distributed.core - INFO - Starting established connection to tcp://10.249.24.16:54910
+2026-07-16 16:47:25,432 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.23.240:46401 name: tcp://10.249.23.240:46401
+2026-07-16 16:47:25,432 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.23.240:46401
+2026-07-16 16:47:25,432 - distributed.core - INFO - Starting established connection to tcp://10.249.23.240:33514
+2026-07-16 16:47:25,432 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.23.240:40063 name: tcp://10.249.23.240:40063
+2026-07-16 16:47:25,432 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.23.240:40063
+2026-07-16 16:47:25,432 - distributed.core - INFO - Starting established connection to tcp://10.249.23.240:33510
+2026-07-16 16:47:25,433 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.23.240:40901 name: tcp://10.249.23.240:40901
+2026-07-16 16:47:25,433 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.23.240:40901
+2026-07-16 16:47:25,433 - distributed.core - INFO - Starting established connection to tcp://10.249.23.240:33512
+2026-07-16 16:47:25,435 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.24.16:34717 name: tcp://10.249.24.16:34717
+2026-07-16 16:47:25,435 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.24.16:34717
+2026-07-16 16:47:25,435 - distributed.core - INFO - Starting established connection to tcp://10.249.24.16:54956
+2026-07-16 16:47:25,435 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.23.240:40717 name: tcp://10.249.23.240:40717
+2026-07-16 16:47:25,435 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.23.240:40717
+2026-07-16 16:47:25,435 - distributed.core - INFO - Starting established connection to tcp://10.249.23.240:33522
+2026-07-16 16:47:25,527 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.23.237:41093 name: tcp://10.249.23.237:41093
+2026-07-16 16:47:25,527 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.23.237:41093
+2026-07-16 16:47:25,527 - distributed.core - INFO - Starting established connection to tcp://10.249.23.237:52880
+2026-07-16 16:47:25,529 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.23.237:44291 name: tcp://10.249.23.237:44291
+2026-07-16 16:47:25,529 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.23.237:44291
+2026-07-16 16:47:25,529 - distributed.core - INFO - Starting established connection to tcp://10.249.23.237:52886
+2026-07-16 16:47:25,530 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.23.237:39055 name: tcp://10.249.23.237:39055
+2026-07-16 16:47:25,530 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.23.237:39055
+2026-07-16 16:47:25,530 - distributed.core - INFO - Starting established connection to tcp://10.249.23.237:52894
+2026-07-16 16:47:25,534 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.23.237:39259 name: tcp://10.249.23.237:39259
+2026-07-16 16:47:25,534 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.23.237:39259
+2026-07-16 16:47:25,534 - distributed.core - INFO - Starting established connection to tcp://10.249.23.237:52910
+2026-07-16 16:47:25,536 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.24.13:43733 name: tcp://10.249.24.13:43733
+2026-07-16 16:47:25,536 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.24.13:43733
+2026-07-16 16:47:25,536 - distributed.core - INFO - Starting established connection to tcp://10.249.24.13:44654
+2026-07-16 16:47:25,537 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.24.13:32893 name: tcp://10.249.24.13:32893
+2026-07-16 16:47:25,537 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.24.13:32893
+2026-07-16 16:47:25,537 - distributed.core - INFO - Starting established connection to tcp://10.249.24.13:44642
+2026-07-16 16:47:25,537 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.24.13:39207 name: tcp://10.249.24.13:39207
+2026-07-16 16:47:25,537 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.24.13:39207
+2026-07-16 16:47:25,537 - distributed.core - INFO - Starting established connection to tcp://10.249.24.13:44670
+2026-07-16 16:47:29,215 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.24.13:42483 name: tcp://10.249.24.13:42483
+2026-07-16 16:47:29,215 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.24.13:42483
+2026-07-16 16:47:29,215 - distributed.core - INFO - Starting established connection to tcp://10.249.24.13:44704
+2026-07-16 16:49:16,678 - distributed.scheduler - INFO - Receive client connection: Client-f49fae4f-8170-11f1-a8c0-0040a6847d8a
+2026-07-16 16:49:16,678 - distributed.core - INFO - Starting established connection to tcp://10.249.23.237:40608
+2026-07-16 16:50:32,244 - distributed.core - INFO - Event loop was unresponsive in Scheduler for 23.35s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-07-16 16:54:35,268 - distributed.scheduler - INFO - Remove client Client-f49fae4f-8170-11f1-a8c0-0040a6847d8a
+2026-07-16 16:54:35,269 - distributed.core - INFO - Received 'close-stream' from tcp://10.249.23.237:40608; closing.
+2026-07-16 16:54:35,269 - distributed.scheduler - INFO - Remove client Client-f49fae4f-8170-11f1-a8c0-0040a6847d8a
+2026-07-16 16:54:35,270 - distributed.scheduler - INFO - Close client connection: Client-f49fae4f-8170-11f1-a8c0-0040a6847d8a
+srun: forcing job termination
+2026-07-16 16:54:37,766 - distributed._signals - INFO - Received signal SIGTERM (15)
+2026-07-16 16:54:37,766 - distributed.scheduler - INFO - Closing scheduler. Reason: signal-15
+2026-07-16 16:54:37,767 - distributed.scheduler - INFO - Scheduler closing all comms

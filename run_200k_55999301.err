@@ -1,0 +1,86 @@
+2026-07-18 04:58:58,798 - distributed.scheduler - INFO - -----------------------------------------------
+2026-07-18 04:58:59,396 - distributed.http.proxy - INFO - To route to workers diagnostics web server please install jupyter-server-proxy: python -m pip install jupyter-server-proxy
+2026-07-18 04:58:59,415 - distributed.scheduler - INFO - State start
+2026-07-18 04:58:59,419 - distributed.scheduler - INFO - -----------------------------------------------
+2026-07-18 04:58:59,419 - distributed.scheduler - INFO -   Scheduler at:   tcp://10.249.20.82:8786
+2026-07-18 04:58:59,420 - distributed.scheduler - INFO -   dashboard at:  http://10.249.20.82:8787/status
+2026-07-18 04:58:59,422 - distributed.scheduler - INFO - Registering Worker plugin shuffle
+2026-07-18 04:59:11,014 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.20.82:35823 name: tcp://10.249.20.82:35823
+2026-07-18 04:59:11,069 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.20.82:35823
+2026-07-18 04:59:11,069 - distributed.core - INFO - Starting established connection to tcp://10.249.20.82:39758
+2026-07-18 04:59:11,069 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.20.82:46667 name: tcp://10.249.20.82:46667
+2026-07-18 04:59:11,070 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.20.82:46667
+2026-07-18 04:59:11,070 - distributed.core - INFO - Starting established connection to tcp://10.249.20.82:39764
+2026-07-18 04:59:11,070 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.20.82:34221 name: tcp://10.249.20.82:34221
+2026-07-18 04:59:11,070 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.20.82:34221
+2026-07-18 04:59:11,070 - distributed.core - INFO - Starting established connection to tcp://10.249.20.82:39752
+2026-07-18 04:59:11,070 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.20.82:33037 name: tcp://10.249.20.82:33037
+2026-07-18 04:59:11,071 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.20.82:33037
+2026-07-18 04:59:11,071 - distributed.core - INFO - Starting established connection to tcp://10.249.20.82:39778
+2026-07-18 04:59:11,291 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.20.85:44541 name: tcp://10.249.20.85:44541
+2026-07-18 04:59:11,291 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.20.85:44541
+2026-07-18 04:59:11,291 - distributed.core - INFO - Starting established connection to tcp://10.249.20.85:33682
+2026-07-18 04:59:11,292 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.20.85:41377 name: tcp://10.249.20.85:41377
+2026-07-18 04:59:11,292 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.20.85:41377
+2026-07-18 04:59:11,292 - distributed.core - INFO - Starting established connection to tcp://10.249.20.85:33666
+2026-07-18 04:59:11,293 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.20.85:33819 name: tcp://10.249.20.85:33819
+2026-07-18 04:59:11,293 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.20.85:33819
+2026-07-18 04:59:11,293 - distributed.core - INFO - Starting established connection to tcp://10.249.20.85:33698
+2026-07-18 04:59:11,295 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.20.85:45959 name: tcp://10.249.20.85:45959
+2026-07-18 04:59:11,295 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.20.85:45959
+2026-07-18 04:59:11,295 - distributed.core - INFO - Starting established connection to tcp://10.249.20.85:33650
+2026-07-18 04:59:12,162 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.27.117:38829 name: tcp://10.249.27.117:38829
+2026-07-18 04:59:12,163 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.27.117:38829
+2026-07-18 04:59:12,163 - distributed.core - INFO - Starting established connection to tcp://10.249.27.117:43850
+2026-07-18 04:59:12,169 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.27.117:33603 name: tcp://10.249.27.117:33603
+2026-07-18 04:59:12,169 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.27.117:33603
+2026-07-18 04:59:12,169 - distributed.core - INFO - Starting established connection to tcp://10.249.27.117:43868
+2026-07-18 04:59:12,171 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.27.117:43427 name: tcp://10.249.27.117:43427
+2026-07-18 04:59:12,171 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.27.117:43427
+2026-07-18 04:59:12,171 - distributed.core - INFO - Starting established connection to tcp://10.249.27.117:43846
+2026-07-18 04:59:12,171 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.27.117:43907 name: tcp://10.249.27.117:43907
+2026-07-18 04:59:12,172 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.27.117:43907
+2026-07-18 04:59:12,172 - distributed.core - INFO - Starting established connection to tcp://10.249.27.117:43864
+2026-07-18 04:59:12,386 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.40.168:43105 name: tcp://10.249.40.168:43105
+2026-07-18 04:59:12,386 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.40.168:43105
+2026-07-18 04:59:12,387 - distributed.core - INFO - Starting established connection to tcp://10.249.40.168:35398
+2026-07-18 04:59:12,389 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.40.168:33939 name: tcp://10.249.40.168:33939
+2026-07-18 04:59:12,390 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.40.168:33939
+2026-07-18 04:59:12,390 - distributed.core - INFO - Starting established connection to tcp://10.249.40.168:35388
+2026-07-18 04:59:12,390 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.40.168:42913 name: tcp://10.249.40.168:42913
+2026-07-18 04:59:12,390 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.40.168:42913
+2026-07-18 04:59:12,390 - distributed.core - INFO - Starting established connection to tcp://10.249.40.168:35380
+2026-07-18 04:59:12,391 - distributed.scheduler - INFO - Register worker addr: tcp://10.249.40.168:34695 name: tcp://10.249.40.168:34695
+2026-07-18 04:59:12,391 - distributed.scheduler - INFO - Starting worker compute stream, tcp://10.249.40.168:34695
+2026-07-18 04:59:12,391 - distributed.core - INFO - Starting established connection to tcp://10.249.40.168:35402
+2026-07-18 05:03:27,238 - distributed.scheduler - INFO - Receive client connection: Client-af2b4158-82a0-11f1-b4bd-0040a6848805
+2026-07-18 05:03:27,239 - distributed.core - INFO - Starting established connection to tcp://10.249.20.82:49656
+2026-07-18 05:12:37,384 - distributed.core - INFO - Event loop was unresponsive in Scheduler for 40.12s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-07-18 05:12:42,504 - distributed.core - INFO - Event loop was unresponsive in Scheduler for 3.52s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-07-18 05:13:02,305 - distributed.core - INFO - Event loop was unresponsive in Scheduler for 17.00s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-07-18 15:19:01,995 - distributed.core - INFO - Received 'close-stream' from tcp://10.249.20.85:33698; closing.
+2026-07-18 15:19:02,000 - distributed.core - INFO - Received 'close-stream' from tcp://10.249.40.168:35380; closing.
+2026-07-18 15:19:02,000 - distributed.core - INFO - Received 'close-stream' from tcp://10.249.40.168:35388; closing.
+2026-07-18 15:19:02,001 - distributed.core - INFO - Received 'close-stream' from tcp://10.249.40.168:35402; closing.
+2026-07-18 15:19:02,001 - distributed.core - INFO - Received 'close-stream' from tcp://10.249.20.85:33682; closing.
+2026-07-18 15:19:02,001 - distributed.core - INFO - Received 'close-stream' from tcp://10.249.40.168:35398; closing.
+2026-07-18 15:19:02,001 - distributed.core - INFO - Received 'close-stream' from tcp://10.249.20.85:33666; closing.
+2026-07-18 15:19:02,001 - distributed.core - INFO - Received 'close-stream' from tcp://10.249.27.117:43868; closing.
+2026-07-18 15:19:02,001 - distributed.core - INFO - Received 'close-stream' from tcp://10.249.27.117:43846; closing.
+2026-07-18 15:19:02,001 - distributed.core - INFO - Received 'close-stream' from tcp://10.249.27.117:43864; closing.
+2026-07-18 15:19:02,001 - distributed.core - INFO - Received 'close-stream' from tcp://10.249.27.117:43850; closing.
+2026-07-18 15:19:02,001 - distributed.core - INFO - Received 'close-stream' from tcp://10.249.20.85:33650; closing.
+2026-07-18 15:19:02,002 - distributed.scheduler - INFO - Remove worker addr: tcp://10.249.20.85:33819 name: tcp://10.249.20.85:33819 (stimulus_id='handle-worker-cleanup-1784413142.0022056')
+2026-07-18 15:19:02,002 - distributed.scheduler - INFO - Remove worker addr: tcp://10.249.40.168:42913 name: tcp://10.249.40.168:42913 (stimulus_id='handle-worker-cleanup-1784413142.0027056')
+2026-07-18 15:19:02,002 - distributed.scheduler - INFO - Remove worker addr: tcp://10.249.40.168:33939 name: tcp://10.249.40.168:33939 (stimulus_id='handle-worker-cleanup-1784413142.0029504')
+2026-07-18 15:19:02,003 - distributed.scheduler - INFO - Remove worker addr: tcp://10.249.40.168:34695 name: tcp://10.249.40.168:34695 (stimulus_id='handle-worker-cleanup-1784413142.0031834')
+2026-07-18 15:19:02,003 - distributed.scheduler - INFO - Remove worker addr: tcp://10.249.20.85:44541 name: tcp://10.249.20.85:44541 (stimulus_id='handle-worker-cleanup-1784413142.0033991')
+2026-07-18 15:19:02,003 - distributed.scheduler - INFO - Remove worker addr: tcp://10.249.40.168:43105 name: tcp://10.249.40.168:43105 (stimulus_id='handle-worker-cleanup-1784413142.00361')
+2026-07-18 15:19:02,003 - distributed.scheduler - INFO - Remove worker addr: tcp://10.249.20.85:41377 name: tcp://10.249.20.85:41377 (stimulus_id='handle-worker-cleanup-1784413142.003821')
+2026-07-18 15:19:02,003 - distributed.scheduler - ERROR - Removing worker 'tcp://10.249.20.85:41377' caused the cluster to lose scattered data, which can't be recovered: {'ndarray-7f5d445484efb377d75a6e92b403b404'} (stimulus_id='handle-worker-cleanup-1784413142.003821')
+2026-07-18 15:19:02,004 - distributed.scheduler - INFO - Remove worker addr: tcp://10.249.27.117:33603 name: tcp://10.249.27.117:33603 (stimulus_id='handle-worker-cleanup-1784413142.0042243')
+2026-07-18 15:19:02,004 - distributed.scheduler - INFO - Remove worker addr: tcp://10.249.27.117:43427 name: tcp://10.249.27.117:43427 (stimulus_id='handle-worker-cleanup-1784413142.0044465')
+2026-07-18 15:19:02,004 - distributed.scheduler - INFO - Remove worker addr: tcp://10.249.27.117:43907 name: tcp://10.249.27.117:43907 (stimulus_id='handle-worker-cleanup-1784413142.004649')
+2026-07-18 15:19:02,004 - distributed.scheduler - INFO - Remove worker addr: tcp://10.249.27.117:38829 name: tcp://10.249.27.117:38829 (stimulus_id='handle-worker-cleanup-1784413142.0048523')
+2026-07-18 15:19:02,005 - distributed.scheduler - INFO - Remove worker addr: tcp://10.249.20.85:45959 name: tcp://10.249.20.85:45959 (stimulus_id='handle-worker-cleanup-1784413142.0050507')
+[2026-07-18T22:19:02.007] error: *** JOB 55999301 ON nid003093 CANCELLED AT 2026-07-18T22:19:02 DUE to SIGNAL Terminated ***

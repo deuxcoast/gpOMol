@@ -1,0 +1,337 @@
+2026-07-18 04:59:06,060 - distributed.nanny - INFO -         Start Nanny at: 'tcp://10.249.20.82:42323'
+2026-07-18 04:59:06,061 - distributed.nanny - INFO -         Start Nanny at: 'tcp://10.249.20.82:44399'
+2026-07-18 04:59:06,061 - distributed.nanny - INFO -         Start Nanny at: 'tcp://10.249.20.82:33383'
+2026-07-18 04:59:06,065 - distributed.nanny - INFO -         Start Nanny at: 'tcp://10.249.20.82:38887'
+2026-07-18 04:59:06,955 - distributed.nanny - INFO -         Start Nanny at: 'tcp://10.249.20.85:33307'
+2026-07-18 04:59:06,955 - distributed.nanny - INFO -         Start Nanny at: 'tcp://10.249.20.85:39865'
+2026-07-18 04:59:06,955 - distributed.nanny - INFO -         Start Nanny at: 'tcp://10.249.20.85:37443'
+2026-07-18 04:59:06,965 - distributed.nanny - INFO -         Start Nanny at: 'tcp://10.249.20.85:46591'
+2026-07-18 04:59:07,315 - distributed.nanny - INFO -         Start Nanny at: 'tcp://10.249.27.117:34389'
+2026-07-18 04:59:07,315 - distributed.nanny - INFO -         Start Nanny at: 'tcp://10.249.27.117:39909'
+2026-07-18 04:59:07,316 - distributed.nanny - INFO -         Start Nanny at: 'tcp://10.249.27.117:44729'
+2026-07-18 04:59:07,316 - distributed.nanny - INFO -         Start Nanny at: 'tcp://10.249.27.117:43581'
+2026-07-18 04:59:07,542 - distributed.nanny - INFO -         Start Nanny at: 'tcp://10.249.40.168:44303'
+2026-07-18 04:59:07,546 - distributed.nanny - INFO -         Start Nanny at: 'tcp://10.249.40.168:37617'
+2026-07-18 04:59:07,546 - distributed.nanny - INFO -         Start Nanny at: 'tcp://10.249.40.168:33377'
+2026-07-18 04:59:07,552 - distributed.nanny - INFO -         Start Nanny at: 'tcp://10.249.40.168:45207'
+2026-07-18 04:59:10,891 - distributed.worker - INFO -       Start worker at:   tcp://10.249.20.82:34221
+2026-07-18 04:59:10,892 - distributed.worker - INFO -          Listening to:   tcp://10.249.20.82:34221
+2026-07-18 04:59:10,892 - distributed.worker - INFO -          dashboard at:         10.249.20.82:36113
+2026-07-18 04:59:10,892 - distributed.worker - INFO - Waiting to connect to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:10,892 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:10,892 - distributed.worker - INFO -       Start worker at:   tcp://10.249.20.82:35823
+2026-07-18 04:59:10,892 - distributed.worker - INFO -               Threads:                          1
+2026-07-18 04:59:10,892 - distributed.worker - INFO -          Listening to:   tcp://10.249.20.82:35823
+2026-07-18 04:59:10,892 - distributed.worker - INFO -                Memory:                  30.00 GiB
+2026-07-18 04:59:10,892 - distributed.worker - INFO -       Start worker at:   tcp://10.249.20.82:46667
+2026-07-18 04:59:10,892 - distributed.worker - INFO -          dashboard at:         10.249.20.82:45707
+2026-07-18 04:59:10,892 - distributed.worker - INFO -          Listening to:   tcp://10.249.20.82:46667
+2026-07-18 04:59:10,892 - distributed.worker - INFO -       Local Directory: /tmp/dask-scratch-space/worker-igi7acud
+2026-07-18 04:59:10,892 - distributed.worker - INFO - Waiting to connect to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:10,892 - distributed.worker - INFO -          dashboard at:         10.249.20.82:32935
+2026-07-18 04:59:10,892 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:10,892 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:10,892 - distributed.worker - INFO -               Threads:                          1
+2026-07-18 04:59:10,892 - distributed.worker - INFO - Waiting to connect to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:10,892 - distributed.worker - INFO -                Memory:                  30.00 GiB
+2026-07-18 04:59:10,892 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:10,892 - distributed.worker - INFO -               Threads:                          1
+2026-07-18 04:59:10,892 - distributed.worker - INFO -       Start worker at:   tcp://10.249.20.82:33037
+2026-07-18 04:59:10,892 - distributed.worker - INFO -       Local Directory: /tmp/dask-scratch-space/worker-b9kkejnk
+2026-07-18 04:59:10,892 - distributed.worker - INFO -                Memory:                  30.00 GiB
+2026-07-18 04:59:10,892 - distributed.worker - INFO -          Listening to:   tcp://10.249.20.82:33037
+2026-07-18 04:59:10,892 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:10,892 - distributed.worker - INFO -       Local Directory: /tmp/dask-scratch-space/worker-bkwcy81j
+2026-07-18 04:59:10,892 - distributed.worker - INFO -          dashboard at:         10.249.20.82:39119
+2026-07-18 04:59:10,892 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:10,892 - distributed.worker - INFO - Waiting to connect to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:10,892 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:10,892 - distributed.worker - INFO -               Threads:                          1
+2026-07-18 04:59:10,892 - distributed.worker - INFO -                Memory:                  30.00 GiB
+2026-07-18 04:59:10,892 - distributed.worker - INFO -       Local Directory: /tmp/dask-scratch-space/worker-_3josumc
+2026-07-18 04:59:10,892 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:11,069 - distributed.worker - INFO - Starting Worker plugin shuffle
+2026-07-18 04:59:11,069 - distributed.worker - INFO -         Registered to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:11,069 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:11,070 - distributed.core - INFO - Starting established connection to tcp://10.249.20.82:8786
+2026-07-18 04:59:11,070 - distributed.worker - INFO - Starting Worker plugin shuffle
+2026-07-18 04:59:11,071 - distributed.worker - INFO -         Registered to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:11,071 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:11,071 - distributed.worker - INFO - Starting Worker plugin shuffle
+2026-07-18 04:59:11,071 - distributed.worker - INFO -         Registered to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:11,071 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:11,071 - distributed.core - INFO - Starting established connection to tcp://10.249.20.82:8786
+2026-07-18 04:59:11,071 - distributed.worker - INFO - Starting Worker plugin shuffle
+2026-07-18 04:59:11,071 - distributed.core - INFO - Starting established connection to tcp://10.249.20.82:8786
+2026-07-18 04:59:11,071 - distributed.worker - INFO -         Registered to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:11,071 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:11,072 - distributed.core - INFO - Starting established connection to tcp://10.249.20.82:8786
+2026-07-18 04:59:11,158 - distributed.worker - INFO -       Start worker at:   tcp://10.249.20.85:45959
+2026-07-18 04:59:11,158 - distributed.worker - INFO -          Listening to:   tcp://10.249.20.85:45959
+2026-07-18 04:59:11,158 - distributed.worker - INFO -          dashboard at:         10.249.20.85:42959
+2026-07-18 04:59:11,158 - distributed.worker - INFO - Waiting to connect to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:11,158 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:11,158 - distributed.worker - INFO -               Threads:                          1
+2026-07-18 04:59:11,158 - distributed.worker - INFO -                Memory:                  30.00 GiB
+2026-07-18 04:59:11,158 - distributed.worker - INFO -       Local Directory: /tmp/dask-scratch-space/worker-cebvi8pj
+2026-07-18 04:59:11,158 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:11,158 - distributed.worker - INFO -       Start worker at:   tcp://10.249.20.85:41377
+2026-07-18 04:59:11,158 - distributed.worker - INFO -          Listening to:   tcp://10.249.20.85:41377
+2026-07-18 04:59:11,158 - distributed.worker - INFO -          dashboard at:         10.249.20.85:41031
+2026-07-18 04:59:11,158 - distributed.worker - INFO - Waiting to connect to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:11,158 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:11,158 - distributed.worker - INFO -               Threads:                          1
+2026-07-18 04:59:11,158 - distributed.worker - INFO -                Memory:                  30.00 GiB
+2026-07-18 04:59:11,158 - distributed.worker - INFO -       Local Directory: /tmp/dask-scratch-space/worker-j32obmmw
+2026-07-18 04:59:11,158 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:11,159 - distributed.worker - INFO -       Start worker at:   tcp://10.249.20.85:44541
+2026-07-18 04:59:11,159 - distributed.worker - INFO -          Listening to:   tcp://10.249.20.85:44541
+2026-07-18 04:59:11,159 - distributed.worker - INFO -          dashboard at:         10.249.20.85:43387
+2026-07-18 04:59:11,159 - distributed.worker - INFO - Waiting to connect to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:11,159 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:11,159 - distributed.worker - INFO -               Threads:                          1
+2026-07-18 04:59:11,159 - distributed.worker - INFO -                Memory:                  30.00 GiB
+2026-07-18 04:59:11,159 - distributed.worker - INFO -       Local Directory: /tmp/dask-scratch-space/worker-qlwhg178
+2026-07-18 04:59:11,159 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:11,168 - distributed.worker - INFO -       Start worker at:   tcp://10.249.20.85:33819
+2026-07-18 04:59:11,168 - distributed.worker - INFO -          Listening to:   tcp://10.249.20.85:33819
+2026-07-18 04:59:11,168 - distributed.worker - INFO -          dashboard at:         10.249.20.85:41067
+2026-07-18 04:59:11,168 - distributed.worker - INFO - Waiting to connect to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:11,168 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:11,168 - distributed.worker - INFO -               Threads:                          1
+2026-07-18 04:59:11,169 - distributed.worker - INFO -                Memory:                  30.00 GiB
+2026-07-18 04:59:11,169 - distributed.worker - INFO -       Local Directory: /tmp/dask-scratch-space/worker-8p3rjdxx
+2026-07-18 04:59:11,169 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:11,291 - distributed.worker - INFO - Starting Worker plugin shuffle
+2026-07-18 04:59:11,291 - distributed.worker - INFO -         Registered to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:11,292 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:11,292 - distributed.core - INFO - Starting established connection to tcp://10.249.20.82:8786
+2026-07-18 04:59:11,293 - distributed.worker - INFO - Starting Worker plugin shuffle
+2026-07-18 04:59:11,293 - distributed.worker - INFO -         Registered to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:11,293 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:11,293 - distributed.worker - INFO - Starting Worker plugin shuffle
+2026-07-18 04:59:11,293 - distributed.worker - INFO -         Registered to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:11,293 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:11,294 - distributed.core - INFO - Starting established connection to tcp://10.249.20.82:8786
+2026-07-18 04:59:11,294 - distributed.core - INFO - Starting established connection to tcp://10.249.20.82:8786
+2026-07-18 04:59:11,295 - distributed.worker - INFO - Starting Worker plugin shuffle
+2026-07-18 04:59:11,296 - distributed.worker - INFO -         Registered to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:11,296 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:11,296 - distributed.core - INFO - Starting established connection to tcp://10.249.20.82:8786
+2026-07-18 04:59:12,034 - distributed.worker - INFO -       Start worker at:  tcp://10.249.27.117:43427
+2026-07-18 04:59:12,035 - distributed.worker - INFO -          Listening to:  tcp://10.249.27.117:43427
+2026-07-18 04:59:12,035 - distributed.worker - INFO -       Start worker at:  tcp://10.249.27.117:38829
+2026-07-18 04:59:12,035 - distributed.worker - INFO -          dashboard at:        10.249.27.117:35937
+2026-07-18 04:59:12,035 - distributed.worker - INFO -          Listening to:  tcp://10.249.27.117:38829
+2026-07-18 04:59:12,035 - distributed.worker - INFO - Waiting to connect to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:12,035 - distributed.worker - INFO -          dashboard at:        10.249.27.117:35573
+2026-07-18 04:59:12,035 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:12,035 - distributed.worker - INFO - Waiting to connect to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:12,035 - distributed.worker - INFO -               Threads:                          1
+2026-07-18 04:59:12,035 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:12,035 - distributed.worker - INFO -                Memory:                  30.00 GiB
+2026-07-18 04:59:12,035 - distributed.worker - INFO -               Threads:                          1
+2026-07-18 04:59:12,035 - distributed.worker - INFO -                Memory:                  30.00 GiB
+2026-07-18 04:59:12,035 - distributed.worker - INFO -       Local Directory: /tmp/dask-scratch-space/worker-k5waw7jv
+2026-07-18 04:59:12,035 - distributed.worker - INFO -       Local Directory: /tmp/dask-scratch-space/worker-aa_n5k9c
+2026-07-18 04:59:12,035 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:12,035 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:12,037 - distributed.worker - INFO -       Start worker at:  tcp://10.249.27.117:43907
+2026-07-18 04:59:12,037 - distributed.worker - INFO -       Start worker at:  tcp://10.249.27.117:33603
+2026-07-18 04:59:12,037 - distributed.worker - INFO -          Listening to:  tcp://10.249.27.117:43907
+2026-07-18 04:59:12,037 - distributed.worker - INFO -          Listening to:  tcp://10.249.27.117:33603
+2026-07-18 04:59:12,037 - distributed.worker - INFO -          dashboard at:        10.249.27.117:33507
+2026-07-18 04:59:12,037 - distributed.worker - INFO - Waiting to connect to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:12,037 - distributed.worker - INFO -          dashboard at:        10.249.27.117:44719
+2026-07-18 04:59:12,037 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:12,037 - distributed.worker - INFO -               Threads:                          1
+2026-07-18 04:59:12,037 - distributed.worker - INFO - Waiting to connect to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:12,037 - distributed.worker - INFO -                Memory:                  30.00 GiB
+2026-07-18 04:59:12,037 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:12,037 - distributed.worker - INFO -               Threads:                          1
+2026-07-18 04:59:12,037 - distributed.worker - INFO -       Local Directory: /tmp/dask-scratch-space/worker-w1xtz1lo
+2026-07-18 04:59:12,037 - distributed.worker - INFO -                Memory:                  30.00 GiB
+2026-07-18 04:59:12,037 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:12,037 - distributed.worker - INFO -       Local Directory: /tmp/dask-scratch-space/worker-wp99zi4k
+2026-07-18 04:59:12,037 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:12,163 - distributed.worker - INFO - Starting Worker plugin shuffle
+2026-07-18 04:59:12,163 - distributed.worker - INFO -         Registered to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:12,163 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:12,164 - distributed.core - INFO - Starting established connection to tcp://10.249.20.82:8786
+2026-07-18 04:59:12,169 - distributed.worker - INFO - Starting Worker plugin shuffle
+2026-07-18 04:59:12,170 - distributed.worker - INFO -         Registered to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:12,170 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:12,170 - distributed.core - INFO - Starting established connection to tcp://10.249.20.82:8786
+2026-07-18 04:59:12,171 - distributed.worker - INFO - Starting Worker plugin shuffle
+2026-07-18 04:59:12,172 - distributed.worker - INFO -         Registered to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:12,172 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:12,172 - distributed.worker - INFO - Starting Worker plugin shuffle
+2026-07-18 04:59:12,172 - distributed.core - INFO - Starting established connection to tcp://10.249.20.82:8786
+2026-07-18 04:59:12,172 - distributed.worker - INFO -         Registered to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:12,172 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:12,173 - distributed.core - INFO - Starting established connection to tcp://10.249.20.82:8786
+2026-07-18 04:59:12,284 - distributed.worker - INFO -       Start worker at:  tcp://10.249.40.168:42913
+2026-07-18 04:59:12,284 - distributed.worker - INFO -          Listening to:  tcp://10.249.40.168:42913
+2026-07-18 04:59:12,284 - distributed.worker - INFO -          dashboard at:        10.249.40.168:43807
+2026-07-18 04:59:12,285 - distributed.worker - INFO - Waiting to connect to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:12,285 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:12,285 - distributed.worker - INFO -               Threads:                          1
+2026-07-18 04:59:12,285 - distributed.worker - INFO -                Memory:                  30.00 GiB
+2026-07-18 04:59:12,285 - distributed.worker - INFO -       Local Directory: /tmp/dask-scratch-space/worker-8gpx1gu7
+2026-07-18 04:59:12,285 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:12,287 - distributed.worker - INFO -       Start worker at:  tcp://10.249.40.168:33939
+2026-07-18 04:59:12,287 - distributed.worker - INFO -          Listening to:  tcp://10.249.40.168:33939
+2026-07-18 04:59:12,287 - distributed.worker - INFO -          dashboard at:        10.249.40.168:41417
+2026-07-18 04:59:12,287 - distributed.worker - INFO - Waiting to connect to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:12,287 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:12,287 - distributed.worker - INFO -       Start worker at:  tcp://10.249.40.168:43105
+2026-07-18 04:59:12,287 - distributed.worker - INFO -               Threads:                          1
+2026-07-18 04:59:12,287 - distributed.worker - INFO -                Memory:                  30.00 GiB
+2026-07-18 04:59:12,287 - distributed.worker - INFO -          Listening to:  tcp://10.249.40.168:43105
+2026-07-18 04:59:12,287 - distributed.worker - INFO -       Local Directory: /tmp/dask-scratch-space/worker-woslslc4
+2026-07-18 04:59:12,287 - distributed.worker - INFO -          dashboard at:        10.249.40.168:42073
+2026-07-18 04:59:12,287 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:12,287 - distributed.worker - INFO - Waiting to connect to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:12,287 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:12,287 - distributed.worker - INFO -               Threads:                          1
+2026-07-18 04:59:12,287 - distributed.worker - INFO -                Memory:                  30.00 GiB
+2026-07-18 04:59:12,287 - distributed.worker - INFO -       Local Directory: /tmp/dask-scratch-space/worker-_u42vap8
+2026-07-18 04:59:12,287 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:12,291 - distributed.worker - INFO -       Start worker at:  tcp://10.249.40.168:34695
+2026-07-18 04:59:12,291 - distributed.worker - INFO -          Listening to:  tcp://10.249.40.168:34695
+2026-07-18 04:59:12,291 - distributed.worker - INFO -          dashboard at:        10.249.40.168:39209
+2026-07-18 04:59:12,291 - distributed.worker - INFO - Waiting to connect to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:12,291 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:12,291 - distributed.worker - INFO -               Threads:                          1
+2026-07-18 04:59:12,291 - distributed.worker - INFO -                Memory:                  30.00 GiB
+2026-07-18 04:59:12,291 - distributed.worker - INFO -       Local Directory: /tmp/dask-scratch-space/worker-_yrvnbaj
+2026-07-18 04:59:12,291 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:12,387 - distributed.worker - INFO - Starting Worker plugin shuffle
+2026-07-18 04:59:12,387 - distributed.worker - INFO -         Registered to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:12,387 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:12,388 - distributed.core - INFO - Starting established connection to tcp://10.249.20.82:8786
+2026-07-18 04:59:12,390 - distributed.worker - INFO - Starting Worker plugin shuffle
+2026-07-18 04:59:12,390 - distributed.worker - INFO -         Registered to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:12,390 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:12,391 - distributed.worker - INFO - Starting Worker plugin shuffle
+2026-07-18 04:59:12,391 - distributed.worker - INFO -         Registered to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:12,391 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:12,391 - distributed.core - INFO - Starting established connection to tcp://10.249.20.82:8786
+2026-07-18 04:59:12,391 - distributed.core - INFO - Starting established connection to tcp://10.249.20.82:8786
+2026-07-18 04:59:12,392 - distributed.worker - INFO - Starting Worker plugin shuffle
+2026-07-18 04:59:12,392 - distributed.worker - INFO -         Registered to:    tcp://10.249.20.82:8786
+2026-07-18 04:59:12,392 - distributed.worker - INFO - -------------------------------------------------
+2026-07-18 04:59:12,392 - distributed.core - INFO - Starting established connection to tcp://10.249.20.82:8786
+2026-07-18 05:13:17,970 - distributed.core - INFO - Event loop was unresponsive in Worker for 15.66s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-07-18 05:13:17,970 - distributed.core - INFO - Event loop was unresponsive in Worker for 15.66s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-07-18 05:13:17,971 - distributed.core - INFO - Event loop was unresponsive in Worker for 15.66s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-07-18 05:13:18,306 - distributed.core - INFO - Event loop was unresponsive in Worker for 16.00s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-07-18 05:13:19,139 - distributed.core - INFO - Event loop was unresponsive in Worker for 16.82s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-07-18 05:13:19,139 - distributed.core - INFO - Event loop was unresponsive in Worker for 16.83s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-07-18 05:13:19,140 - distributed.core - INFO - Event loop was unresponsive in Worker for 16.83s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-07-18 05:13:19,192 - distributed.core - INFO - Event loop was unresponsive in Worker for 16.88s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-07-18 05:13:20,348 - distributed.core - INFO - Event loop was unresponsive in Worker for 18.03s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-07-18 05:13:20,430 - distributed.core - INFO - Event loop was unresponsive in Worker for 18.11s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-07-18 05:13:20,639 - distributed.core - INFO - Event loop was unresponsive in Worker for 18.33s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-07-18 05:13:20,687 - distributed.core - INFO - Event loop was unresponsive in Worker for 18.37s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-07-18 05:13:21,468 - distributed.core - INFO - Event loop was unresponsive in Worker for 19.16s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-07-18 05:13:21,469 - distributed.core - INFO - Event loop was unresponsive in Worker for 19.16s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-07-18 05:13:21,485 - distributed.core - INFO - Event loop was unresponsive in Worker for 19.16s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-07-18 05:13:21,501 - distributed.core - INFO - Event loop was unresponsive in Worker for 19.19s.  This is often caused by long-running GIL-holding functions or moving large chunks of data. This can cause timeouts and instability.
+2026-07-18 15:19:01,986 - distributed._signals - INFO - Received signal SIGTERM (15)
+2026-07-18 15:19:01,986 - distributed.nanny - INFO - Closing Nanny at 'tcp://10.249.40.168:33377'. Reason: signal-15
+2026-07-18 15:19:01,987 - distributed._signals - INFO - Received signal SIGTERM (15)
+2026-07-18 15:19:01,986 - distributed._signals - INFO - Received signal SIGTERM (15)
+2026-07-18 15:19:01,987 - distributed._signals - INFO - Received signal SIGTERM (15)
+2026-07-18 15:19:01,987 - distributed._signals - INFO - Received signal SIGTERM (15)
+2026-07-18 15:19:01,986 - distributed._signals - INFO - Received signal SIGTERM (15)
+2026-07-18 15:19:01,988 - distributed.nanny - INFO - Closing Nanny at 'tcp://10.249.27.117:39909'. Reason: signal-15
+2026-07-18 15:19:01,987 - distributed.nanny - INFO - Closing Nanny at 'tcp://10.249.20.85:39865'. Reason: signal-15
+2026-07-18 15:19:01,987 - distributed.nanny - INFO - Closing Nanny at 'tcp://10.249.40.168:37617'. Reason: signal-15
+2026-07-18 15:19:01,987 - distributed._signals - INFO - Received signal SIGTERM (15)
+2026-07-18 15:19:01,987 - distributed.nanny - INFO - Nanny asking worker to close. Reason: signal-15
+2026-07-18 15:19:01,987 - distributed._signals - INFO - Received signal SIGTERM (15)
+2026-07-18 15:19:01,987 - distributed._signals - INFO - Received signal SIGTERM (15)
+2026-07-18 15:19:01,987 - distributed._signals - INFO - Received signal SIGTERM (15)
+2026-07-18 15:19:01,987 - distributed.nanny - INFO - Closing Nanny at 'tcp://10.249.40.168:44303'. Reason: signal-15
+2026-07-18 15:19:01,988 - distributed.nanny - INFO - Closing Nanny at 'tcp://10.249.27.117:44729'. Reason: signal-15
+2026-07-18 15:19:01,987 - distributed.nanny - INFO - Nanny asking worker to close. Reason: signal-15
+2026-07-18 15:19:01,988 - distributed.nanny - INFO - Closing Nanny at 'tcp://10.249.27.117:34389'. Reason: signal-15
+2026-07-18 15:19:01,987 - distributed.nanny - INFO - Closing Nanny at 'tcp://10.249.40.168:45207'. Reason: signal-15
+2026-07-18 15:19:01,988 - distributed.nanny - INFO - Closing Nanny at 'tcp://10.249.27.117:43581'. Reason: signal-15
+2026-07-18 15:19:01,987 - distributed.nanny - INFO - Nanny asking worker to close. Reason: signal-15
+2026-07-18 15:19:01,988 - distributed.nanny - INFO - Nanny asking worker to close. Reason: signal-15
+2026-07-18 15:19:01,987 - distributed.nanny - INFO - Nanny asking worker to close. Reason: signal-15
+2026-07-18 15:19:01,988 - distributed.worker - INFO - Stopping worker at tcp://10.249.40.168:42913. Reason: signal-15
+2026-07-18 15:19:01,988 - distributed.nanny - INFO - Nanny asking worker to close. Reason: signal-15
+2026-07-18 15:19:01,988 - distributed.nanny - INFO - Nanny asking worker to close. Reason: signal-15
+2026-07-18 15:19:01,988 - distributed.nanny - INFO - Nanny asking worker to close. Reason: signal-15
+2026-07-18 15:19:01,988 - distributed.worker - INFO - Removing Worker plugin shuffle
+2026-07-18 15:19:01,988 - distributed.worker - INFO - Stopping worker at tcp://10.249.40.168:33939. Reason: signal-15
+2026-07-18 15:19:01,988 - distributed.worker - INFO - Stopping worker at tcp://10.249.40.168:34695. Reason: signal-15
+2026-07-18 15:19:01,987 - distributed.nanny - INFO - Closing Nanny at 'tcp://10.249.20.85:33307'. Reason: signal-15
+2026-07-18 15:19:01,987 - distributed._signals - INFO - Received signal SIGTERM (15)
+2026-07-18 15:19:01,988 - distributed.worker - INFO - Removing Worker plugin shuffle
+2026-07-18 15:19:01,987 - distributed.nanny - INFO - Nanny asking worker to close. Reason: signal-15
+2026-07-18 15:19:01,988 - distributed.worker - INFO - Stopping worker at tcp://10.249.20.85:44541. Reason: signal-15
+2026-07-18 15:19:01,987 - distributed.nanny - INFO - Nanny asking worker to close. Reason: signal-15
+2026-07-18 15:19:01,988 - distributed.worker - INFO - Stopping worker at tcp://10.249.20.85:33819. Reason: signal-15
+2026-07-18 15:19:01,988 - distributed.worker - INFO - Removing Worker plugin shuffle
+2026-07-18 15:19:01,987 - distributed.nanny - INFO - Closing Nanny at 'tcp://10.249.20.85:37443'. Reason: signal-15
+2026-07-18 15:19:01,987 - distributed._signals - INFO - Received signal SIGTERM (15)
+2026-07-18 15:19:01,987 - distributed.nanny - INFO - Closing Nanny at 'tcp://10.249.20.85:46591'. Reason: signal-15
+2026-07-18 15:19:01,988 - distributed.nanny - INFO - Nanny asking worker to close. Reason: signal-15
+2026-07-18 15:19:01,989 - distributed.worker - INFO - Removing Worker plugin shuffle
+2026-07-18 15:19:01,989 - distributed.worker - INFO - Removing Worker plugin shuffle
+2026-07-18 15:19:01,988 - distributed.worker - INFO - Stopping worker at tcp://10.249.20.85:41377. Reason: signal-15
+2026-07-18 15:19:01,988 - distributed.worker - INFO - Stopping worker at tcp://10.249.40.168:43105. Reason: signal-15
+2026-07-18 15:19:01,989 - distributed.nanny - INFO - Nanny asking worker to close. Reason: signal-15
+2026-07-18 15:19:01,989 - distributed.worker - INFO - Stopping worker at tcp://10.249.27.117:33603. Reason: signal-15
+2026-07-18 15:19:01,989 - distributed.worker - INFO - Removing Worker plugin shuffle
+2026-07-18 15:19:01,989 - distributed.worker - INFO - Removing Worker plugin shuffle
+2026-07-18 15:19:01,989 - distributed.worker - INFO - Removing Worker plugin shuffle
+2026-07-18 15:19:01,989 - distributed.worker - INFO - Stopping worker at tcp://10.249.27.117:43427. Reason: signal-15
+2026-07-18 15:19:01,989 - distributed.worker - INFO - Stopping worker at tcp://10.249.27.117:38829. Reason: signal-15
+2026-07-18 15:19:01,989 - distributed.worker - INFO - Stopping worker at tcp://10.249.27.117:43907. Reason: signal-15
+2026-07-18 15:19:01,989 - distributed.worker - INFO - Removing Worker plugin shuffle
+2026-07-18 15:19:01,989 - distributed.worker - INFO - Removing Worker plugin shuffle
+2026-07-18 15:19:01,989 - distributed.core - INFO - Connection to tcp://10.249.20.82:8786 has been closed.
+2026-07-18 15:19:01,989 - distributed.worker - INFO - Removing Worker plugin shuffle
+2026-07-18 15:19:01,990 - distributed.worker - INFO - Stopping worker at tcp://10.249.20.85:45959. Reason: signal-15
+2026-07-18 15:19:01,989 - distributed.core - INFO - Connection to tcp://10.249.20.82:8786 has been closed.
+2026-07-18 15:19:01,990 - distributed.worker - INFO - Removing Worker plugin shuffle
+2026-07-18 15:19:01,990 - distributed.core - INFO - Connection to tcp://10.249.20.82:8786 has been closed.
+2026-07-18 15:19:01,990 - distributed.core - INFO - Connection to tcp://10.249.20.82:8786 has been closed.
+2026-07-18 15:19:01,990 - distributed.core - INFO - Connection to tcp://10.249.20.82:8786 has been closed.
+2026-07-18 15:19:01,990 - distributed.core - INFO - Connection to tcp://10.249.20.82:8786 has been closed.
+2026-07-18 15:19:01,990 - distributed.core - INFO - Connection to tcp://10.249.20.82:8786 has been closed.
+2026-07-18 15:19:01,990 - distributed.core - INFO - Connection to tcp://10.249.20.82:8786 has been closed.
+2026-07-18 15:19:01,991 - distributed.nanny - INFO - Worker closed
+2026-07-18 15:19:01,991 - distributed.core - INFO - Connection to tcp://10.249.20.82:8786 has been closed.
+2026-07-18 15:19:01,991 - distributed.core - INFO - Connection to tcp://10.249.20.82:8786 has been closed.
+2026-07-18 15:19:01,991 - distributed.core - INFO - Connection to tcp://10.249.20.82:8786 has been closed.
+2026-07-18 15:19:01,991 - distributed.nanny - INFO - Worker closed
+2026-07-18 15:19:01,991 - distributed.nanny - INFO - Worker closed
+2026-07-18 15:19:01,991 - distributed.core - INFO - Connection to tcp://10.249.20.82:8786 has been closed.
+2026-07-18 15:19:01,991 - distributed.nanny - INFO - Worker closed
+2026-07-18 15:19:01,991 - distributed.nanny - INFO - Worker closed
+2026-07-18 15:19:01,991 - distributed.nanny - INFO - Worker closed
+2026-07-18 15:19:01,992 - distributed.nanny - INFO - Worker closed
+2026-07-18 15:19:01,992 - distributed.nanny - INFO - Worker closed
+2026-07-18 15:19:01,992 - distributed.nanny - INFO - Worker closed
+2026-07-18 15:19:01,992 - distributed.nanny - INFO - Worker closed
+2026-07-18 15:19:01,992 - distributed.nanny - INFO - Worker closed
+2026-07-18 15:19:01,992 - distributed.nanny - INFO - Worker closed
+[2026-07-18T22:19:02.006] error: *** STEP 55999301.0 ON nid003093 CANCELLED AT 2026-07-18T22:19:02 DUE to SIGNAL Terminated ***
+2026-07-18 15:19:02,007 - distributed._signals - INFO - Received signal SIGTERM (15)
+2026-07-18 15:19:02,007 - distributed._signals - INFO - Received signal SIGTERM (15)
+2026-07-18 15:19:02,007 - distributed._signals - INFO - Received signal SIGTERM (15)
+2026-07-18 15:19:02,007 - distributed._signals - INFO - Received signal SIGTERM (15)
+2026-07-18 15:19:02,007 - distributed.nanny - INFO - Closing Nanny at 'tcp://10.249.20.82:33383'. Reason: signal-15
+2026-07-18 15:19:02,007 - distributed.nanny - INFO - Closing Nanny at 'tcp://10.249.20.82:42323'. Reason: signal-15
+2026-07-18 15:19:02,007 - distributed.nanny - INFO - Closing Nanny at 'tcp://10.249.20.82:38887'. Reason: signal-15
+2026-07-18 15:19:02,007 - distributed.nanny - INFO - Closing Nanny at 'tcp://10.249.20.82:44399'. Reason: signal-15
+2026-07-18 15:19:02,008 - distributed.nanny - INFO - Nanny asking worker to close. Reason: signal-15
+2026-07-18 15:19:02,008 - distributed.nanny - INFO - Nanny asking worker to close. Reason: signal-15
+2026-07-18 15:19:02,008 - distributed.nanny - INFO - Nanny asking worker to close. Reason: signal-15
+2026-07-18 15:19:02,008 - distributed.nanny - INFO - Nanny asking worker to close. Reason: signal-15
