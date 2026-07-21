@@ -32,3 +32,11 @@ train_4M/
 
 # ...except the materialised dataset cache, which lives in cache/ but is huge
 cache/materialized_*.pkl
+
+# Legacy experiment/plot output (regenerable) -- keeps `git status` clean. New
+# figures elsewhere (root, diagnostics/) stay trackable.
+gp/**/*.png
+gp/*.png
+scripts/**/*.png
+scripts/*.png
+descriptor_eval/**/*.png
