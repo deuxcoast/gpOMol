@@ -34,7 +34,9 @@ class WLGPPipeline:
     min_count: int = 5
     pls_components: int = 10
     scaling: str = "pareto"  # SparsePLS column pre-weighting (grid-chosen; see reduce)
-    cutoff_percentile: float = 25.0
+    cutoff_percentile: float = 25.0  # None => skip cutoff calibration (caller supplies
+                                     # it, e.g. dim_sweep sweeps --cutoffs); avoids a
+                                     # wasted/confusing recalibrate print in that path
     cutoff_abs: float = None  # absolute compact-support radius; if set, OVERRIDES the
                               # percentile (the scale is now N-invariant, so an absolute
                               # radius from the variogram/R_inf transfers across N)
@@ -84,10 +86,12 @@ class WLGPPipeline:
             pct = float(percentileofscore(pdist(samp), self.cutoff_))
             print(f"[pipe] using ABSOLUTE cutoff {self.cutoff_:.5f} "
                   f"(~{pct:.2f}th pairwise-distance pctile here; --cutoff-pct ignored)")
-        else:
+        elif self.cutoff_percentile is not None:
             self.cutoff_, _ = recalibrate(
                 Z_tr, percentile=self.cutoff_percentile, dim=self.dim_
             )
+        else:
+            self.cutoff_ = None   # caller supplies the cutoff (e.g. dim_sweep sweeps it)
         return Z_tr
 
     def transform(self, atoms, client=None, chunk=500):

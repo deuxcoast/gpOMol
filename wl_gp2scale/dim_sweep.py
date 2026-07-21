@@ -126,7 +126,7 @@ def run(args, client):
         # one embedding per seed; dims slice it. vocab_sample=0 -> vocab on ALL train.
         pipe = WLGPPipeline(
             depth=args.depth, min_count=args.min_count,
-            pls_components=args.pls, cutoff_percentile=args.cutoff_pct,
+            pls_components=args.pls, cutoff_percentile=None,  # we sweep the cutoff
             scaling=args.scaling, vocab_sample=0,
         )
         Z_tr = pipe.fit(atoms_tr, y_tr, cat_tr, client=client)
