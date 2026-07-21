@@ -101,6 +101,51 @@ def _encode_categories(raw_ids):
     return np.array([lut[str(r)] for r in raw_ids], dtype=np.int64), names
 
 
+def _load_materialized(path, idx_path, n):
+    """Return a cached, fully-materialised Dataset (ONE sequential read) or None.
+
+    A miss (no file), an unreadable/stale pickle, or a cache older than the frozen
+    index file (indices were regenerated) all fall back to re-materialising, so the
+    cache can never silently serve the wrong molecules."""
+    if not os.path.exists(path):
+        return None
+    if os.path.exists(idx_path) and os.path.getmtime(idx_path) > os.path.getmtime(path):
+        print(f"[data] materialised cache older than {idx_path}; re-materialising")
+        return None
+    import pickle
+
+    try:
+        with open(path, "rb") as f:
+            d = pickle.load(f)
+    except Exception as e:  # pragma: no cover - stale pickle across ASE versions etc.
+        print(f"[data] materialised cache {path} unreadable ({e}); re-materialising")
+        return None
+    if not isinstance(d, Dataset) or len(d.atoms) != n:
+        print(f"[data] materialised cache {path} stale (n mismatch); re-materialising")
+        return None
+    print(f"[data] loaded materialised cache {path} ({len(d.atoms):,} molecules) "
+          f"-- skipped {n:,} random lmdb lookups")
+    return d
+
+
+def _save_materialized(path, dataset):
+    """Pickle the whole Dataset to ONE file via an atomic write (temp + os.replace),
+    so an interrupted run never leaves a half-written cache behind."""
+    import pickle
+
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "wb") as f:
+            pickle.dump(dataset, f, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp, path)
+        print(f"[data] wrote materialised cache {path} "
+              f"({os.path.getsize(path) / 1e6:.0f} MB)")
+    except Exception as e:  # pragma: no cover
+        print(f"[data] could not write materialised cache ({e})")
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
 def get_data(
     src: str = "train_4M",
     n: int = 200_000,
@@ -113,10 +158,18 @@ def get_data(
     residual target, and extract integer categories. Indices are frozen to
     ``cache_dir/subset_indices_{n}.npy`` so featurizer/reducer see identical rows.
     """
-    from fairchem.core.datasets import AseDBDataset
-
     os.makedirs(cache_dir, exist_ok=True)
     idx_path = os.path.join(cache_dir, f"subset_indices_{n}.npy")
+    mat_path = os.path.join(cache_dir, f"materialized_{n}.pkl")
+
+    # FAST PATH: a materialised cache turns n RANDOM lmdb lookups (latency-bound on a
+    # network filesystem -- what stalls runs even when bulk throughput is fine) into
+    # ONE sequential read. On a hit we skip opening the dataset entirely.
+    cached = _load_materialized(mat_path, idx_path, n)
+    if cached is not None:
+        return cached
+
+    from fairchem.core.datasets import AseDBDataset
 
     ds = AseDBDataset({"src": src})
     N = len(ds)
@@ -163,7 +216,9 @@ def get_data(
         f"[data] residual var={np.var(y):.4g} (std {np.std(y):.4g}); "
         f"{len(names)} categories: {names}"
     )
-    return Dataset(atoms=atoms, y=y, data_id=cats, category_names=names, mean=mean)
+    dataset = Dataset(atoms=atoms, y=y, data_id=cats, category_names=names, mean=mean)
+    _save_materialized(mat_path, dataset)   # pay the random-access cost ONCE
+    return dataset
 
 
 def stratified_sample_indices(data_id: np.ndarray, size: int, seed: int = 0) -> np.ndarray:
