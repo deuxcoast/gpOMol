@@ -81,6 +81,13 @@ def build_argparser():
     ap.add_argument("--backend", default="wendland32",
                     choices=["wendland32", "wendland_d0"])
     ap.add_argument("--linalg", default="sparseCG")
+    ap.add_argument("--cg-maxiter", type=int, default=None,
+                    help="cap CG iterations (fail fast on an ill-conditioned split "
+                         "instead of grinding; fvgp warns 'CG not successful')")
+    ap.add_argument("--cg-tol", type=float, default=None,
+                    help="CG relative tolerance (fvgp sparse_cg_tol; default 1e-5)")
+    ap.add_argument("--logdet-verbose", action="store_true",
+                    help="print imate stochastic-Lanczos log-det progress")
     ap.add_argument("--jitter", type=float, default=1e-6)
     ap.add_argument("--signal-var", type=float, default=None,
                     help="frozen signal variance; default var(y_train)")
@@ -189,6 +196,8 @@ def main():
         compute_device=args.compute_device,
         device=args.device,
         logdet_rtol=(0.01 if args.train else args.logdet_rtol),
+        cg_maxiter=args.cg_maxiter, cg_tol=args.cg_tol,
+        logdet_verbose=args.logdet_verbose,
     )
     print(f"[run] GP constructed in {time.time()-t_gp:.0f}s "
           f"(kernel assembly + logdet + KVinvY solve)")

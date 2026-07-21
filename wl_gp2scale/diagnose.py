@@ -65,7 +65,8 @@ import numpy as np
 def build_argparser():
     ap = argparse.ArgumentParser(
         description="gp2Scale diagnostics: bisect / cutoff sweep / informative radius")
-    ap.add_argument("--mode", choices=["bisect", "sweep", "radius", "variogram"],
+    ap.add_argument("--mode",
+                    choices=["bisect", "sweep", "radius", "variogram", "conditioning"],
                     default="bisect")
     ap.add_argument("--src", default="train_4M")
     ap.add_argument("--n", type=int, default=6000, help="molecules to load")
@@ -120,6 +121,17 @@ def build_argparser():
                     help="skip writing PNG plots")
     ap.add_argument("--out", default=None,
                     help="variogram mode: optional .npz of the curve arrays")
+    # conditioning-only
+    ap.add_argument("--cond-n", type=int, default=8000,
+                    help="conditioning: rows to subsample for the Gram/eigsh/CG probe")
+    ap.add_argument("--dup-eps", type=float, default=None,
+                    help="conditioning: near-duplicate distance threshold "
+                         "(default 0.05*cutoff)")
+    ap.add_argument("--noise-grid", default="1e-6,1e-3,1e-2,1e-1,1.0",
+                    help="conditioning: comma-separated sigma^2 values for the "
+                         "cond/CG-iteration curve (the nugget is inserted automatically)")
+    ap.add_argument("--cg-maxiter", type=int, default=5000,
+                    help="conditioning: CG iteration cap for the cost probe")
     return ap
 
 
@@ -338,6 +350,70 @@ def run_variogram(args, E):
         np.savez(args.out, lag=vg["lag"], gamma=vg["gamma"], count=vg["count"],
                  sill=sill, range=(np.nan if rng is None else rng))
         print(f"[vario] wrote {args.out}")
+
+
+# ------------------------------------------------------------- conditioning mode
+
+
+def run_conditioning(args, E):
+    """Why is the sparse solve slow, and what noise should we use? Reports near-
+    duplicate structure, the nugget (recommended sigma^2), lambda_max/min, and a
+    MEASURED cond + CG-iteration curve over the noise grid. GP-free."""
+    from .conditioning import conditioning_report
+
+    Z, y, cat = E["Z_tr_full"], E["y_tr_full"], E["cat_tr_full"]
+    cut, dim = E["cutoff"], E["dim"]
+    n = len(Z)
+    m = min(args.cond_n, n)
+    if m < n:
+        idx = np.random.default_rng(0).choice(n, size=m, replace=False)
+        Z, y, cat = Z[idx, :dim], y[idx], cat[idx]
+    else:
+        Z = Z[:, :dim]
+    grid = tuple(float(x) for x in args.noise_grid.split(","))
+
+    rep = conditioning_report(Z, y, cut, cat=cat, noise_grid=grid,
+                              dup_eps=args.dup_eps, cg_maxiter=args.cg_maxiter)
+    d = rep["duplicates"]
+    print(f"\n[cond] {rep['n']:,} molecules (subsampled), cutoff={cut:.5f}, dim={dim}, "
+          f"signal_var={rep['signal_var']:.3f}, Gram nnz={rep['nnz']:,}")
+    print(f"[cond] near-duplicates (dist < {rep['dup_eps']:.4f}): {d['n_pairs']:,} pairs, "
+          f"{d['n_points_in_dup']:,} points in a dup ({d['frac_in_dup']:.1%}), "
+          f"largest cluster = {d['largest_cluster']:,}")
+    print(f"[cond]   -> these near-identical rows are what drive lambda_min(K) -> 0 and "
+          f"blow up the condition number.")
+    lmin = "n/a (SA did not converge)" if rep["lambda_min"] is None else f"{rep['lambda_min']:.3e}"
+    print(f"[cond] lambda_max(K) = {rep['lambda_max']:.3e}   lambda_min(K) = {lmin}")
+
+    if rep["nugget"] is not None:
+        print(f"[cond] variogram NUGGET = {rep['nugget']:.4g}  = 0.5*<(y_i-y_j)^2> over "
+              f"near-duplicate pairs = the descriptor-aliasing noise.")
+        print(f"[cond]   This is the statistically CORRECT observation noise sigma^2 -- "
+              f"it is not 'papering over' conditioning, it IS the noise near-duplicates "
+              f"represent (gp2Scale Eq. 1 carries a noise matrix V explicitly).")
+    else:
+        print(f"[cond] no near-duplicate pairs at eps={rep['dup_eps']:.4f}; nugget not "
+              f"estimable -- lower --dup-eps or the matrix may be well-conditioned.")
+
+    print(f"\n[cond] measured cond + CG cost vs noise sigma^2 (CG on (K+sigma^2 I)x=rhs):")
+    hdr = f"{'sigma^2':>11}{'cond(K+s2I)':>14}{'sqrt(cond)':>11}{'CG iters':>10}{'residual':>11}{'converged':>11}"
+    print(hdr); print("-" * len(hdr))
+    for c in rep["curve"]:
+        tag = "  <- NUGGET (recommended)" if c["is_nugget"] else ""
+        print(f"{c['sigma2']:>11.2e}{c['cond']:>14.2e}{c['sqrt_cond']:>11.0f}"
+              f"{c['cg_iters']:>10}{c['cg_resid']:>11.1e}{str(c['converged']):>11}{tag}")
+    print(f"\n[cond] sqrt(cond) tracks CG iterations up to a ln(2/tol) factor; the "
+          f"measured 'CG iters' is the truth (it depends on the full spectrum, not just "
+          f"cond). Pick the SMALLEST sigma^2 whose CG-iters is small -- that is your "
+          f"--jitter, and the nugget is the principled value.")
+    if args.out:
+        np.savez(args.out,
+                 sigma2=np.array([c["sigma2"] for c in rep["curve"]]),
+                 cond=np.array([c["cond"] for c in rep["curve"]]),
+                 cg_iters=np.array([c["cg_iters"] for c in rep["curve"]]),
+                 nugget=(np.nan if rep["nugget"] is None else rep["nugget"]),
+                 lambda_max=rep["lambda_max"])
+        print(f"[cond] wrote {args.out}")
 
 
 # ---------------------------------------------------------------- radius mode
@@ -587,6 +663,8 @@ def main():
         run_radius(args, E)
     elif args.mode == "variogram":
         run_variogram(args, E)
+    elif args.mode == "conditioning":
+        run_conditioning(args, E)
     else:
         run_bisect(args, E)
 
