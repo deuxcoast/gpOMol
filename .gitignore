@@ -1,16 +1,34 @@
+# OS / editor cruft
 .DS_Store
-train_4M/
-*.png
-*.svg
-cache/
-descriptor_eval/*/*.npy
-descriptor_eval/*/*.npz
-hybrid_descriptor/*.npy
-hybrid_descriptor/*.npz
-gp/*/*.npy
-gp/*/*.npz
-gp/*.npy
-gp/*.npz
-*.pkl
+
+# Python
+__pycache__/
+*.pyc
+
+# Environments & secrets -- never commit
+.env
+*.env
+*.pem
+*.key
 gpomol/
-__pycache__
+
+# Cluster / Dask runtime logs
+scheduler_file*.json
+dask_worker_info.txt
+dask_launch.log
+dask-worker-space/
+
+# Data too large for GitHub (all regenerable)
+train_4M/
+*.aselmdb*
+*.pkl
+
+# Large numpy arrays anywhere -- but KEEP the small cache/ files the figures use
+# (sweep_*.npz, subset_indices_*.npy, y_residual_*.npy, mean_model_*.npz)
+*.npy
+*.npz
+!cache/*.npy
+!cache/*.npz
+
+# ...except the materialised dataset cache, which lives in cache/ but is huge
+cache/materialized_*.pkl
