@@ -1,26 +1,29 @@
 #!/usr/bin/env python
 """
-gp_parity.py  (WL-only, explicit-vocabulary PLS + Wendland parity test)
-======================================================================
-WL-ONLY descriptor (geometry + charge channels dropped -- reintroduce later via
-an additive kernel). The WL vector is built by an EXPLICIT per-depth vocabulary
-fitted on the training split (no hashing collisions), then standardized -> PLS
--> compact-support Wendland GP. Output: test parity plot + nearest-neighbour
-coverage diagnostic.
+gp_parity.py  (descriptor PLS + Wendland parity test: WL graph | persistent homology)
+====================================================================================
+Held-out R^2 for a single-descriptor Wendland GP. The descriptor vector is built
+(fit on the training split), scaled, reduced by supervised PLS, and fed to a
+compact-support Wendland GP. Output: test parity plot + nearest-neighbour coverage
+diagnostic. Two descriptors share the pipeline:
+
+  --descriptor wl           EXPLICIT per-depth WL graph counts (no hash collisions).
+  --descriptor persistence  Rips persistence images on the 3D point cloud (the 3D
+                            structure the graph is blind to). Needs ripser + persim.
 
 Key flags:
-  --wl-mode {explicit,hashed}   explicit = exact vocab (default); hashed = legacy
-                                256-bucket, for an A/B on the SAME split.
-  --wl-depth N                  WL refinement depth (default 3).
-  --include-depth0              keep depth-0 (bare element counts); dropped by
-                                default since the extensive mean removes composition.
+  --scaling {standard,pareto,center}  column pre-weighting (pareto recommended;
+                                standard is anti-predictive on sparse counts).
+  --wl-mode {explicit,hashed}   explicit = exact vocab (default); hashed = legacy.
+  --wl-depth N / --include-depth0   WL refinement depth / keep bare element counts.
+  --maxdim N / --pixel-size X / --ph-thresh X   persistence filtration + image grid.
   --metric {l2,l1,...}          distance metric (default l2).
   --pls-components / --no-pls   supervised reduction (fit on train only).
-  --cutoff / --cutoff-pct       compact-support radius (explicit, or auto by pctile).
+  --cutoff / --cutoff-pct       compact-support radius (absolute, or auto by pctile).
   --jitter X                    single fixed-jitter fit (skip the escalating loop).
 
-Leakage control: WL vocabulary, standardizer, and PLS are all fit on TRAIN only.
-Run from inside descriptor_eval/.
+Leakage control: descriptor vocabulary/grid, scaler, and PLS are all fit on TRAIN
+only. Run from inside descriptor_eval/.
 """
 
 import argparse
@@ -376,10 +379,17 @@ def evaluate(
     a_te,
     y_te,
     *,
+    descriptor="wl",
     wl_mode="explicit",
     wl_depth=3,
     include_depth0=False,
     min_count=2,
+    scaling="standard",
+    ph_maxdim=1,
+    ph_pixel_size=0.25,
+    ph_thresh=6.0,
+    esph_top_k=6,
+    esph_pairs="none",
     use_pls=True,
     pls_components=10,
     reduction=None,
@@ -391,23 +401,51 @@ def evaluate(
     jitter=None,
     verbose=True,
 ):
-    """Shared pipeline: WL featurize (fit on train) -> standardize -> PLS ->
-    Wendland GP -> predict test. Sets the module globals the kernel reads and
-    returns everything needed for metrics/diagnostics. Used by main() and by the
-    learning-curve driver so there's a single source of truth."""
+    """Shared pipeline: featurize (fit on train) -> scale -> PLS -> Wendland GP ->
+    predict test. `descriptor` selects WL graph counts or persistent-homology
+    images. Sets the module globals the kernel reads and returns everything needed
+    for metrics/diagnostics. Used by main() and the learning-curve driver so
+    there's a single source of truth."""
     global NORM, NORM_LABEL, CUTOFF, RUN_LABEL
     NORM = METRIC_ALIASES.get(metric.lower(), metric.lower())
     NORM_LABEL = METRIC_LABELS.get(NORM, metric.upper())
 
-    Xs_tr, Xs_te, feat = featurize_wl(
-        a_tr,
-        a_te,
-        wl_mode=wl_mode,
-        wl_depth=wl_depth,
-        include_depth0=include_depth0,
-        min_count=min_count,
-        verbose=verbose,
-    )
+    if descriptor == "element-ph":
+        Xs_tr, Xs_te, feat = featurize_element_ph(
+            a_tr,
+            a_te,
+            maxdim=ph_maxdim,
+            pixel_size=ph_pixel_size,
+            thresh=ph_thresh,
+            top_k=esph_top_k,
+            pairs=esph_pairs,
+            scaling=scaling,
+            verbose=verbose,
+        )
+        desc_label = f"ESPH-k{esph_top_k}-{esph_pairs}"
+    elif descriptor == "persistence":
+        Xs_tr, Xs_te, feat = featurize_persistence(
+            a_tr,
+            a_te,
+            maxdim=ph_maxdim,
+            pixel_size=ph_pixel_size,
+            thresh=ph_thresh,
+            scaling=scaling,
+            verbose=verbose,
+        )
+        desc_label = f"PH-maxdim{ph_maxdim}"
+    else:
+        Xs_tr, Xs_te, feat = featurize_wl(
+            a_tr,
+            a_te,
+            wl_mode=wl_mode,
+            wl_depth=wl_depth,
+            include_depth0=include_depth0,
+            min_count=min_count,
+            scaling=scaling,
+            verbose=verbose,
+        )
+        desc_label = f"WL-{wl_mode}"
     if reduction is None:
         reduction = "pls" if use_pls else "none"
     Z_tr, Z_te, embed = _reduce(
@@ -424,11 +462,30 @@ def evaluate(
         cutoff_pct=cutoff_pct,
         jitter=jitter,
     )
-    RUN_LABEL = f"WL-{wl_mode}-{embed}-{NORM_LABEL}"
+    RUN_LABEL = f"{desc_label}-{embed}-{scaling}-{NORM_LABEL}"
     res.update(
         n_train=len(y_tr), D=feat.n_features_, oov=feat.last_oov_rate_, embed=embed
     )
     return res
+
+
+def _scale(Xr_tr, Xr_te, mode):
+    """Column pre-weighting FIT ON TRAIN, applied to both. Mirrors the wl_gp2scale
+    finding: `standard` (z-score, ÷std) is anti-predictive on sparse counts because
+    it inflates rare features; `pareto` (÷sqrt(std)) is the robust winner; `center`
+    only mean-subtracts. Returns (Xs_tr, Xs_te)."""
+    mean = Xr_tr.mean(axis=0)
+    std = Xr_tr.std(axis=0)
+    std[std == 0] = 1.0
+    if mode == "standard":
+        w = std
+    elif mode == "pareto":
+        w = np.sqrt(std)
+    elif mode == "center":
+        w = np.ones_like(std)
+    else:
+        raise ValueError(f"unknown scaling '{mode}' (standard|pareto|center)")
+    return (Xr_tr - mean) / w, (Xr_te - mean) / w
 
 
 def featurize_wl(
@@ -439,9 +496,10 @@ def featurize_wl(
     wl_depth=3,
     include_depth0=False,
     min_count=2,
+    scaling="standard",
     verbose=True,
 ):
-    """Fit the WL vocabulary on TRAIN, transform both, standardize (train stats).
+    """Fit the WL vocabulary on TRAIN, transform both, scale (train stats).
     Returns (Xs_tr, Xs_te, featurizer). Factored out so a caller can featurize once
     and then reduce/evaluate many times (e.g. a cutoff sweep)."""
     t0 = time.perf_counter()
@@ -450,12 +508,74 @@ def featurize_wl(
     )
     Xr_tr = feat.fit_transform(a_tr)
     Xr_te = feat.transform(a_te)
-    Xs_tr, mean_, std_ = features.standardize(Xr_tr)
-    Xs_te = (Xr_te - mean_) / std_
+    Xs_tr, Xs_te = _scale(Xr_tr, Xr_te, scaling)
     if verbose:
         print(
-            f"[wl] mode={wl_mode} depths={feat.depths_} D={feat.n_features_}  "
-            f"test OOV rate={feat.last_oov_rate_:.1%}  ({time.perf_counter()-t0:.1f}s)"
+            f"[wl] mode={wl_mode} depths={feat.depths_} D={feat.n_features_} "
+            f"scaling={scaling}  test OOV rate={feat.last_oov_rate_:.1%}  "
+            f"({time.perf_counter()-t0:.1f}s)"
+        )
+    return Xs_tr, Xs_te, feat
+
+
+def featurize_persistence(
+    a_tr,
+    a_te,
+    *,
+    maxdim=1,
+    pixel_size=0.25,
+    thresh=6.0,
+    scaling="pareto",
+    verbose=True,
+):
+    """Persistent-homology counterpart to featurize_wl: fit the persistence-image
+    grid on TRAIN (ranges are a population op -> train-only, no leakage), transform
+    both, scale (train stats). Returns (Xs_tr, Xs_te, featurizer)."""
+    import persistence as pers
+
+    t0 = time.perf_counter()
+    feat = pers.PersistenceFeaturizer(
+        maxdim=maxdim, pixel_size=pixel_size, thresh=thresh
+    )
+    Xr_tr = feat.fit_transform(a_tr)
+    Xr_te = feat.transform(a_te)
+    Xs_tr, Xs_te = _scale(Xr_tr, Xr_te, scaling)
+    if verbose:
+        print(
+            f"[ph] maxdim={maxdim} pixel_size={pixel_size} thresh={thresh} "
+            f"D={feat.n_features_} scaling={scaling}  ({time.perf_counter()-t0:.1f}s)"
+        )
+    return Xs_tr, Xs_te, feat
+
+
+def featurize_element_ph(
+    a_tr,
+    a_te,
+    *,
+    maxdim=1,
+    pixel_size=0.25,
+    thresh=6.0,
+    top_k=6,
+    pairs="none",
+    scaling="pareto",
+    verbose=True,
+):
+    """Element-specific PH counterpart to featurize_persistence: the element set
+    and image grids are fit on TRAIN only (no leakage), transform both, scale."""
+    import persistence as pers
+
+    t0 = time.perf_counter()
+    feat = pers.ElementPHFeaturizer(
+        maxdim=maxdim, pixel_size=pixel_size, thresh=thresh, top_k=top_k, pairs=pairs
+    )
+    Xr_tr = feat.fit_transform(a_tr)
+    Xr_te = feat.transform(a_te)
+    Xs_tr, Xs_te = _scale(Xr_tr, Xr_te, scaling)
+    if verbose:
+        print(
+            f"[esph] channels={len(feat.channels_)} maxdim={maxdim} "
+            f"pixel_size={pixel_size} thresh={thresh} D={feat.n_features_} "
+            f"scaling={scaling}  ({time.perf_counter()-t0:.1f}s)"
         )
     return Xs_tr, Xs_te, feat
 
@@ -504,11 +624,55 @@ def main():
     global WL_MODE, WL_DEPTH, INCLUDE_DEPTH0, USE_PLS, PLS_COMPONENTS, CUTOFF
     global RUN_LABEL, NORM, NORM_LABEL
     ap = argparse.ArgumentParser(
-        description="WL-only explicit-vocab PLS + Wendland parity test"
+        description="Descriptor (WL graph | persistent homology) PLS + Wendland parity test"
+    )
+    ap.add_argument(
+        "--descriptor",
+        default="wl",
+        choices=["wl", "persistence", "element-ph"],
+        help="wl = explicit-vocab WL graph counts (default); persistence = Rips "
+        "persistence images; element-ph = element-specific PH (needs ripser + persim)",
+    )
+    ap.add_argument(
+        "--esph-top-k",
+        type=int,
+        default=6,
+        help="element-ph: number of most-common elements to use as channels",
+    )
+    ap.add_argument(
+        "--esph-pairs",
+        default="none",
+        choices=["none", "all"],
+        help="element-ph: also add every element pair as an interactive channel",
+    )
+    ap.add_argument(
+        "--scaling",
+        default="standard",
+        choices=["standard", "pareto", "center"],
+        help="column pre-weighting fit on train (pareto recommended; standard is "
+        "anti-predictive on sparse counts -- see wl_gp2scale)",
     )
     ap.add_argument("--wl-mode", default=WL_MODE, choices=["explicit", "hashed"])
     ap.add_argument("--wl-depth", type=int, default=WL_DEPTH)
     ap.add_argument("--include-depth0", action="store_true")
+    ap.add_argument(
+        "--maxdim",
+        type=int,
+        default=1,
+        help="persistence: max homology dim (0=H0, 1=+rings, 2=+voids)",
+    )
+    ap.add_argument(
+        "--pixel-size",
+        type=float,
+        default=0.25,
+        help="persistence: PersistenceImager pixel size in Angstrom (smaller=finer)",
+    )
+    ap.add_argument(
+        "--ph-thresh",
+        type=float,
+        default=6.0,
+        help="persistence: cap the Rips filtration radius in Angstrom",
+    )
     ap.add_argument(
         "--min-count",
         type=int,
@@ -584,10 +748,17 @@ def main():
         y_tr,
         a_te,
         y_te,
+        descriptor=a.descriptor,
         wl_mode=WL_MODE,
         wl_depth=WL_DEPTH,
         include_depth0=INCLUDE_DEPTH0,
         min_count=a.min_count,
+        scaling=a.scaling,
+        ph_maxdim=a.maxdim,
+        ph_pixel_size=a.pixel_size,
+        ph_thresh=a.ph_thresh,
+        esph_top_k=a.esph_top_k,
+        esph_pairs=a.esph_pairs,
         use_pls=USE_PLS,
         pls_components=PLS_COMPONENTS,
         reduction=a.reduction,
