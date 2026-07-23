@@ -80,11 +80,14 @@ METRIC_LABELS = {"cityblock": "L1", "euclidean": "L2", "chebyshev": "Linf"}
 # ------------------------------ 1. data (atoms + target) --------------------
 
 
-def build_atoms():
+def build_atoms(idx_path=None, y_path=None):
     """Load frozen indices + residual target and the ase.Atoms (featurization is
-    fit-on-train, so it happens AFTER the split, not here)."""
-    idx = np.load(os.path.join(CACHE, "subset_indices.npy"))
-    y = np.load(os.path.join(CACHE, "y_residual.npy"))
+    fit-on-train, so it happens AFTER the split, not here). Defaults to the frozen
+    10k subset; pass idx_path / y_path (e.g. cache/pool20000_s0_{indices,y}.npy) to
+    run a larger cached pool -- the pool's y MUST be its own extensive-mean residual
+    (the mean is refit per pool), which the pool20000 files already are."""
+    idx = np.load(idx_path or os.path.join(CACHE, "subset_indices.npy"))
+    y = np.load(y_path or os.path.join(CACHE, "y_residual.npy"))
     assert len(idx) == len(y), f"indices ({len(idx)}) vs y ({len(y)}) mismatch"
     if SUBSET_N < len(idx):
         idx, y = idx[:SUBSET_N], y[:SUBSET_N]
@@ -390,6 +393,10 @@ def evaluate(
     ph_thresh=6.0,
     esph_top_k=6,
     esph_pairs="none",
+    geom_channels=("rdf", "angle", "torsion", "elec"),
+    geom_top_k=6,
+    geom_r_max=6.0,
+    charge_key="lowdin_charges",
     use_pls=True,
     pls_components=10,
     reduction=None,
@@ -399,6 +406,7 @@ def evaluate(
     cutoff=10.0,
     cutoff_pct=None,
     jitter=None,
+    prior_mean="none",
     verbose=True,
 ):
     """Shared pipeline: featurize (fit on train) -> scale -> PLS -> Wendland GP ->
@@ -434,6 +442,18 @@ def evaluate(
             verbose=verbose,
         )
         desc_label = f"PH-maxdim{ph_maxdim}"
+    elif descriptor == "geometry":
+        Xs_tr, Xs_te, feat = featurize_geometry(
+            a_tr,
+            a_te,
+            channels=geom_channels,
+            top_k=geom_top_k,
+            r_max=geom_r_max,
+            charge_key=charge_key,
+            scaling=scaling,
+            verbose=verbose,
+        )
+        desc_label = f"GEOM-{'+'.join(geom_channels)}"
     else:
         Xs_tr, Xs_te, feat = featurize_wl(
             a_tr,
@@ -461,6 +481,7 @@ def evaluate(
         cutoff=cutoff,
         cutoff_pct=cutoff_pct,
         jitter=jitter,
+        prior_mean=prior_mean,
     )
     RUN_LABEL = f"{desc_label}-{embed}-{scaling}-{NORM_LABEL}"
     res.update(
@@ -580,6 +601,38 @@ def featurize_element_ph(
     return Xs_tr, Xs_te, feat
 
 
+def featurize_geometry(
+    a_tr,
+    a_te,
+    *,
+    channels=("rdf", "angle", "torsion", "elec"),
+    top_k=6,
+    r_max=6.0,
+    charge_key="lowdin_charges",
+    scaling="pareto",
+    verbose=True,
+):
+    """3D-geometry + electrostatics counterpart to featurize_wl: the element set is
+    fit on TRAIN only (radial/angular grids are fixed a priori, so no other train
+    pass), transform both, scale. Returns (Xs_tr, Xs_te, featurizer)."""
+    import geometry as geom
+
+    t0 = time.perf_counter()
+    feat = geom.GeometryFeaturizer(
+        channels=tuple(channels), top_k=top_k, r_max=r_max, charge_key=charge_key
+    )
+    Xr_tr = feat.fit_transform(a_tr)
+    Xr_te = feat.transform(a_te)
+    Xs_tr, Xs_te = _scale(Xr_tr, Xr_te, scaling)
+    if verbose:
+        print(
+            f"[geom] channels={list(channels)} D={feat.n_features_} "
+            f"scaling={scaling}  off-vocab atoms={feat.last_oov_rate_:.1%}  "
+            f"({time.perf_counter()-t0:.1f}s)"
+        )
+    return Xs_tr, Xs_te, feat
+
+
 def gp_eval_embedding(
     Z_tr,
     y_tr,
@@ -590,9 +643,14 @@ def gp_eval_embedding(
     cutoff=10.0,
     cutoff_pct=None,
     jitter=None,
+    prior_mean="none",
 ):
     """Wendland GP on a precomputed embedding. Sets the module globals the kernel
-    reads (NORM, CUTOFF). Raises RuntimeError if non-PD up to the jitter ceiling."""
+    reads (NORM, CUTOFF). With prior_mean='linear' an OLS mean on the embedding is
+    fit on train, the GP models the residual y - m(z), and m(z*) is added back (the
+    wl_gp2scale --prior-mean linear fix for mean-reversion -- ~doubles R^2; without
+    it the GP uses gpcam's constant mean and under-covered points revert to it).
+    Raises RuntimeError if non-PD up to the jitter ceiling."""
     global NORM, NORM_LABEL, CUTOFF
     NORM = METRIC_ALIASES.get(metric.lower(), metric.lower())
     NORM_LABEL = METRIC_LABELS.get(NORM, metric.upper())
@@ -601,11 +659,21 @@ def gp_eval_embedding(
         if cutoff_pct is not None
         else cutoff
     )
-    signal_var = float(np.var(y_tr))
-    if jitter is not None:
-        mean, var, jit = fit_single(Z_tr, y_tr, Z_te, jitter, signal_var)
+    if prior_mean == "linear":
+        A_tr = np.hstack([np.ones((len(Z_tr), 1)), Z_tr])
+        beta, *_ = np.linalg.lstsq(A_tr, y_tr, rcond=None)
+        m_tr = A_tr @ beta
+        m_te = np.hstack([np.ones((len(Z_te), 1)), Z_te]) @ beta
     else:
-        mean, var, jit = fit_with_jitter(Z_tr, y_tr, Z_te, signal_var)
+        m_tr = np.zeros(len(y_tr))
+        m_te = np.zeros(len(y_te))
+    r_tr = y_tr - m_tr
+    signal_var = float(np.var(r_tr))
+    if jitter is not None:
+        mean, var, jit = fit_single(Z_tr, r_tr, Z_te, jitter, signal_var)
+    else:
+        mean, var, jit = fit_with_jitter(Z_tr, r_tr, Z_te, signal_var)
+    mean = mean + m_te
     rmse = float(np.sqrt(np.mean((mean - y_te) ** 2)))
     r2 = float(r2_score(y_te, mean))
     return dict(
@@ -622,16 +690,39 @@ def gp_eval_embedding(
 
 def main():
     global WL_MODE, WL_DEPTH, INCLUDE_DEPTH0, USE_PLS, PLS_COMPONENTS, CUTOFF
-    global RUN_LABEL, NORM, NORM_LABEL
+    global RUN_LABEL, NORM, NORM_LABEL, SUBSET_N
     ap = argparse.ArgumentParser(
         description="Descriptor (WL graph | persistent homology) PLS + Wendland parity test"
     )
     ap.add_argument(
         "--descriptor",
         default="wl",
-        choices=["wl", "persistence", "element-ph"],
+        choices=["wl", "persistence", "element-ph", "geometry"],
         help="wl = explicit-vocab WL graph counts (default); persistence = Rips "
-        "persistence images; element-ph = element-specific PH (needs ripser + persim)",
+        "persistence images; element-ph = element-specific PH (needs ripser + persim); "
+        "geometry = 3D partial-RDF + angle/torsion + electrostatics (geometry.py)",
+    )
+    ap.add_argument(
+        "--geom-channels",
+        default="rdf,angle,torsion,elec",
+        help="geometry: comma-separated subset of rdf,angle,torsion,elec (ablation)",
+    )
+    ap.add_argument(
+        "--geom-top-k",
+        type=int,
+        default=6,
+        help="geometry: number of most-common elements for RDF pairs + charge moments",
+    )
+    ap.add_argument(
+        "--geom-r-max",
+        type=float,
+        default=6.0,
+        help="geometry: max radius (Angstrom) for the partial RDFs",
+    )
+    ap.add_argument(
+        "--charge-key",
+        default="lowdin_charges",
+        help="atoms.info key for per-atom partial charges (geometry elec channel)",
     )
     ap.add_argument(
         "--esph-top-k",
@@ -729,12 +820,40 @@ def main():
         help="use only the first N TRAIN molecules (test set held fixed); "
         "for learning-curve experiments",
     )
+    ap.add_argument(
+        "--prior-mean",
+        default="none",
+        choices=["none", "linear"],
+        help="linear = OLS prior mean on the embedding (models residual, adds back; "
+        "~doubles R^2 by fixing mean-reversion). Recommended for geometry.",
+    )
+    ap.add_argument(
+        "--indices",
+        default=None,
+        help="cached index .npy to load (default cache/subset_indices.npy = frozen 10k; "
+        "e.g. cache/pool20000_s0_indices.npy for 20k)",
+    )
+    ap.add_argument(
+        "--y-file",
+        default=None,
+        help="cached residual target .npy matching --indices (e.g. "
+        "cache/pool20000_s0_y.npy). MUST be that pool's own extensive-mean residual.",
+    )
+    ap.add_argument(
+        "--subset-n",
+        type=int,
+        default=None,
+        help="cap total molecules loaded (default: all in --indices). Set to the "
+        "pool size, e.g. 20000, to use the whole pool.",
+    )
     a = ap.parse_args()
     WL_MODE, WL_DEPTH, INCLUDE_DEPTH0 = a.wl_mode, a.wl_depth, a.include_depth0
     USE_PLS, PLS_COMPONENTS, CUTOFF = not a.no_pls, a.pls_components, a.cutoff
+    if a.subset_n is not None:
+        SUBSET_N = a.subset_n
     print(f"[metric] {a.metric}")
 
-    atoms, y = build_atoms()
+    atoms, y = build_atoms(idx_path=a.indices, y_path=a.y_file)
     a_tr, a_te, y_tr, y_te = train_test_split(
         atoms, y, test_size=TEST_FRACTION, random_state=RANDOM_STATE
     )
@@ -759,6 +878,10 @@ def main():
         ph_thresh=a.ph_thresh,
         esph_top_k=a.esph_top_k,
         esph_pairs=a.esph_pairs,
+        geom_channels=tuple(c.strip() for c in a.geom_channels.split(",") if c.strip()),
+        geom_top_k=a.geom_top_k,
+        geom_r_max=a.geom_r_max,
+        charge_key=a.charge_key,
         use_pls=USE_PLS,
         pls_components=PLS_COMPONENTS,
         reduction=a.reduction,
@@ -768,6 +891,7 @@ def main():
         cutoff=a.cutoff,
         cutoff_pct=a.cutoff_pct,
         jitter=a.jitter,
+        prior_mean=a.prior_mean,
     )
     print(f"[wl] D={res['D']}  test OOV={res['oov']:.1%}   cutoff={res['cutoff']:.4g}")
 
