@@ -1,19 +1,26 @@
 """
 run_eval.py  (descriptor_eval)
 =============================
-Orchestrator for Candidate A. Produces TWO variogram clouds against the shared,
-descriptor-independent residual target:
+Orchestrator. For the chosen `--descriptor`, produces TWO variogram clouds
+against the shared, descriptor-independent residual target:
 
-  1. WL-feature-raw  : Euclidean distance on the standardized 323-dim descriptor
-                       (validates the descriptor itself).
-  2. WL-feature-pls  : Euclidean distance on the PLS-reduced embedding the kernel
-                       would actually see. PLS is supervised (fit on y) IN-SAMPLE
-                       here -- the cloud is descriptive, not a generalization
-                       claim -- and is labeled as such on the plot.
+  1. <tag>-raw  : Euclidean distance on the standardized raw descriptor
+                  (validates the descriptor itself).
+  2. <tag>-pls  : Euclidean distance on the PLS-reduced embedding the kernel
+                  would actually see. PLS is supervised (fit on y) IN-SAMPLE
+                  here -- the cloud is descriptive, not a generalization
+                  claim -- and is labeled as such on the plot.
+
+Descriptors:
+  wl (default)  : the 323-dim hybrid WL+geometry+charge vector (features.py).
+  persistence   : Rips persistent-homology images (persistence.py) -- tests
+                  whether distances between persistence diagrams track the
+                  property (Marcus's curiosity). Needs ripser + persim installed.
 
 Usage
 -----
     python run_eval.py --src ../train_4M --n 10000 --pls_components 10
+    python run_eval.py --descriptor persistence --n 10000 --maxdim 1
 """
 
 import argparse
@@ -44,6 +51,43 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--pls_components", type=int, default=10)
     ap.add_argument(
+        "--descriptor",
+        choices=["wl", "persistence", "element-ph"],
+        default="wl",
+        help="which candidate descriptor to featurize (default wl). "
+        "element-ph = element-specific persistent homology",
+    )
+    ap.add_argument(
+        "--esph-top-k",
+        type=int,
+        default=6,
+        help="element-ph: number of most-common elements to use as channels",
+    )
+    ap.add_argument(
+        "--esph-pairs",
+        default="none",
+        choices=["none", "all"],
+        help="element-ph: also add every element pair as an interactive channel",
+    )
+    ap.add_argument(
+        "--maxdim",
+        type=int,
+        default=1,
+        help="persistence: max homology dim (0=H0, 1=+rings, 2=+voids)",
+    )
+    ap.add_argument(
+        "--pixel-size",
+        type=float,
+        default=1.0,
+        help="persistence: PersistenceImager pixel size (smaller = higher res)",
+    )
+    ap.add_argument(
+        "--ph-thresh",
+        type=float,
+        default=None,
+        help="persistence: cap the Rips filtration radius in Angstrom (speed/range guard)",
+    )
+    ap.add_argument(
         "--n_lags", type=int, default=20, help="empirical bins (equal-count)"
     )
     ap.add_argument(
@@ -66,8 +110,28 @@ def main():
     # 1. shared subset + descriptor-independent residual target
     atoms_list, y, _ = data_mod.get_data(a.src, n=a.n, seed=a.seed)
 
-    # 2. raw standardized descriptor
-    X_raw = feat.feature_matrix(atoms_list)
+    # 2. raw descriptor matrix (candidate-specific), then standardize
+    if a.descriptor == "element-ph":
+        import persistence as pers
+
+        X_raw = pers.ElementPHFeaturizer(
+            maxdim=a.maxdim, pixel_size=a.pixel_size, thresh=a.ph_thresh,
+            top_k=a.esph_top_k, pairs=a.esph_pairs,
+        ).fit_transform(atoms_list)
+        tag = f"ESPH-k{a.esph_top_k}-{a.esph_pairs}"
+        raw_sub = f"Euclidean on standardized element-specific PH images ({X_raw.shape[1]}-dim)"
+    elif a.descriptor == "persistence":
+        import persistence as pers
+
+        X_raw = pers.PersistenceFeaturizer(
+            maxdim=a.maxdim, pixel_size=a.pixel_size, thresh=a.ph_thresh
+        ).fit_transform(atoms_list)
+        tag = f"PH-maxdim{a.maxdim}"
+        raw_sub = f"Euclidean on standardized persistence images ({X_raw.shape[1]}-dim)"
+    else:
+        X_raw = feat.feature_matrix(atoms_list)
+        tag = "WL-feature"
+        raw_sub = f"Euclidean on standardized {X_raw.shape[1]}-dim descriptor"
     X_std, _, _ = feat.standardize(X_raw)
     print(f"[features] standardized matrix {X_std.shape}")
 
@@ -83,8 +147,8 @@ def main():
 
     # 4. build each Variogram ONCE with the chosen metric, render the chosen mode
     for label, coords, sub in [
-        ("WL-feature-raw", X_std, "Euclidean on standardized 323-dim descriptor"),
-        ("WL-feature-pls", Z, f"{a.pls_components}-comp PLS (in-sample)"),
+        (f"{tag}-raw", X_std, raw_sub),
+        (f"{tag}-pls", Z, f"{a.pls_components}-comp PLS (in-sample)"),
     ]:
         V = build_variogram(coords, y, dist_func=metric_func, n_lags=a.n_lags)
         render = plot_cloud if a.cloud else plot_empirical
