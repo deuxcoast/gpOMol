@@ -1,0 +1,22 @@
+[
+ [
+  "B97M-V or wB97M-V functional requested.libXC variant has now been activated.Any manually given DFX/HFX/RangeSe",
+  3936919
+ ],
+ [
+  "Analytic gradients for DFT-NL dispersion can only be done using the self-consistent method,Switching to SCNL",
+  3936919
+ ],
+ [
+  "Self-consistent DFT-NL dispersion not compatible with AutoTRAH.Switching AutoTRAH off",
+  3936919
+ ],
+ [
+  "your system is open-shell and RHF/RKS was chosenWILL SWITCH to UHF/UKS",
+  672699
+ ],
+ [
+  "Old DensityContainer found on disk!Will remove this file -If you want to keep old densities, please start your",
+  512484
+ ]
+]

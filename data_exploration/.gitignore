@@ -1,0 +1,12 @@
+# Regenerable scan artefacts (the census alone is ~340 MB; families.npz ~122 MB).
+# Rebuild with: python -m data_exploration.run_all
+cache/census_parts/
+cache/families.npz
+cache/derived.npz
+
+# The small JSON summaries ARE tracked -- summary.json, families.json and
+# warnings.json are what REPORT.md and the poster quote, so they must be
+# versioned alongside the prose that cites them.
+!cache/summary.json
+!cache/families.json
+!cache/warnings.json
