@@ -240,6 +240,112 @@ def make_wl_block_kernel(cutoff: float, **kw) -> WLBlockKernel:
 
 
 # ----------------------------------------------------------------------------
+# additive N-channel kernel (WL + geometry, later + charge)
+# ----------------------------------------------------------------------------
+
+
+@dataclass
+class ChannelSpec:
+    """One additive channel: the embedding columns ``[start:stop]``, its
+    compact-support ``cutoff``, and its Wendland ``backend``/``k``."""
+
+    start: int
+    stop: int
+    cutoff: float
+    backend: str = "wendland32"
+    k: int = 2
+
+
+@dataclass
+class AdditiveWendlandKernel:
+    """Callable ``kernel_function(x1, x2, hps)`` for gp2Scale: a SUM of compact-support
+    Wendland blocks, one per channel, each on its own column range with its own cutoff
+    and its own signal variance. Generalises ``WLBlockKernel`` to k = sum_c sv_c *
+    psi_c(||z_c - z'_c|| / cutoff_c); a single channel reproduces ``WLBlockKernel``
+    exactly (same conditioning-critical numerics: donot_use_mm cdist, float64, hard
+    compact support, per-pair category mask).
+
+    The embedding fed to the GP is ``[z_0 | z_1 | ... | data_id]`` -- the category tag
+    is the LAST column (index ``total_dim = channels[-1].stop``), so
+    with_category_tag / sort_by_category are unchanged.
+
+    hps layout: ``hps[:C]`` = the C per-channel signal variances; if
+    ``cutoffs_are_hp`` then ``hps[C:2C]`` override the per-channel cutoffs (lets the
+    optimiser tune support per channel). Signal variances are trained under --train.
+    """
+
+    channels: list  # list[ChannelSpec]
+    use_category_tag: bool = True
+    device: Optional[str] = None
+    dtype: str = "float64"
+    cutoffs_are_hp: bool = False
+
+    def __post_init__(self):
+        if torch is None:
+            raise ImportError("wl_gp2scale.kernel requires PyTorch.")
+        self.channels = [c if isinstance(c, ChannelSpec) else ChannelSpec(*c)
+                         for c in self.channels]
+        for c in self.channels:
+            if c.backend not in ("wendland32", "wendland_d0"):
+                raise ValueError("backend must be 'wendland32' or 'wendland_d0'")
+        self._device = pick_device(self.device)
+        self._tdtype = torch.float32 if self.dtype == "float32" else torch.float64
+        self._total_dim = self.channels[-1].stop
+
+    def _psi(self, t, ch: ChannelSpec):
+        if ch.backend == "wendland32":
+            return _wendland32(t)
+        return _wendland_d0(t, d0=(ch.stop - ch.start), k=ch.k)
+
+    def __call__(self, x1, x2, hps):
+        C = len(self.channels)
+        x1 = np.asarray(x1)
+        x2 = np.asarray(x2)
+        n1, n2 = x1.shape[0], x2.shape[0]
+
+        # category tag (last column); block-skip disjoint categories with no distance.
+        cats1 = cats2 = None
+        if self.use_category_tag:
+            cats1 = x1[:, self._total_dim].astype(np.int64)
+            cats2 = x2[:, self._total_dim].astype(np.int64)
+            if np.intersect1d(np.unique(cats1), np.unique(cats2)).size == 0:
+                return np.zeros((n1, n2), dtype=np.float64)
+
+        dev, td = self._device, self._tdtype
+        K = torch.zeros((n1, n2), dtype=td, device=dev)
+        for c, ch in enumerate(self.channels):
+            sv = float(hps[c])
+            cutoff = (float(hps[C + c]) if (self.cutoffs_are_hp and len(hps) > C + c)
+                      else ch.cutoff)
+            a = torch.as_tensor(x1[:, ch.start:ch.stop], dtype=td, device=dev)
+            b = torch.as_tensor(x2[:, ch.start:ch.stop], dtype=td, device=dev)
+            # compute_mode is load-bearing (see WLBlockKernel.__call__): the mm
+            # expansion returns nonzero self-distances on near-duplicate points and
+            # corrupts the near-singular Gram.
+            D = torch.cdist(a, b, compute_mode="donot_use_mm_for_euclid_dist")
+            t = torch.clamp(D / cutoff, 0.0, 1.0)
+            Kc = self._psi(t, ch)
+            Kc = torch.where(t < 1.0, Kc, torch.zeros_like(Kc))  # hard compact support
+            if sv != 1.0:
+                Kc = Kc * sv
+            K = K + Kc
+
+        # per-pair category mask (blocks straddling a category boundary)
+        if cats1 is not None and cats2 is not None:
+            ca = torch.as_tensor(cats1, device=dev).view(-1, 1)
+            cb = torch.as_tensor(cats2, device=dev).view(1, -1)
+            K = torch.where(ca == cb, K, torch.zeros_like(K))
+
+        return K.to("cpu").double().numpy()
+
+
+def make_additive_kernel(channels, **kw) -> AdditiveWendlandKernel:
+    """Factory: ``channels`` = list of ChannelSpec (or (start, stop, cutoff[, backend,
+    k]) tuples). Returns a ready ``kernel_function(x1, x2, hps)``."""
+    return AdditiveWendlandKernel(channels=list(channels), **kw)
+
+
+# ----------------------------------------------------------------------------
 # dense reference (for validation parity only) — NOT used at scale
 # ----------------------------------------------------------------------------
 

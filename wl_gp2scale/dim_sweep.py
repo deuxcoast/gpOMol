@@ -1,31 +1,23 @@
 """
 dim_sweep.py  (wl_gp2scale)
 ===========================
-Confirm on the ACTUAL gp2Scale Wendland kernel what the truncated-R^2 diagnostic
-(reduce.truncated_r2_curve) predicted on OLS. Sweeps embedding dim x cutoff x
-split-seed and reports predictive R^2 + realised density.
+Channel comparison on the ACTUAL gp2Scale Wendland kernel: for each requested
+channel mode -- ``wl`` (graph), ``geom`` (3D geometry+charge), ``additive``
+(k = k_WL + k_geom) -- report held-out predictive R^2 at the current N. This is the
+ladder driver for the 40k/80k/200k comparison established in descriptor_eval, where
+geometry dominates at small N but WL scales faster, so the two are expected to
+converge near ~200k (exactly where the additive kernel should pay off).
 
-Cutoff sweep: pass ``--cutoffs 0.16 0.22 0.28 ...`` to test several ABSOLUTE radii
-while REUSING one embedding per seed (featurise + PLS are cutoff-independent; only
-the kernel changes). This is the cheap way to pick the cutoff -- look for the largest
-GP_R2 whose median in-support neighbour count is still well-conditioned (tens, not
-hundreds). ``--cutoff`` (single) and ``--cutoff-pct`` (per-dim percentile) still work.
-
-For each split seed:
-  * fit vocab (ALL train -> 0% train OOV) + natural-scaled PLS(pls_components) on
-    train, transform test -> a single 10-D embedding shared by every dim slice, so
-    the dims-1..d comparison is apples-to-apples (SIMPLS components are sequential:
-    the first d columns are identical whatever the total).
-  * for each dim d: slice Z[:, :d], RECALIBRATE the cutoff at that dim (distances
-    change with d; same percentile keeps the in-support fraction comparable), build
-    the frozen-hyperparameter gp2Scale GP, predict test mean, score R^2 vs truth.
-    Also prints the dense OLS R^2 on the same slice as a cross-check against the
-    reduce.truncated_r2_curve numbers.
-
-Frozen hyperparameters only (signal_var = var(y_tr), fixed cutoff) -- no training,
-so each build is CG solves only. The cutoff is held at one percentile across dims;
-that is the honest default but it does NOT hold neighbour count / conditioning fixed
-across dims, so the per-dim median-neighbour line is printed to keep that visible.
+For each split seed the two embeddings are built ONCE (WLGPPipeline for the graph
+channel, GeometryPipeline for the geometry channel), then each requested mode reuses
+them -- no re-featurisation. Each channel gets its OWN compact-support cutoff tuned to
+``--target-neighbors`` (the validated sparsity lever; percentile mis-tracks the median
+neighbour count on the clustered embedding, see cutoff.cutoff_for_neighbors). The
+additive kernel sums the two blocks; ``--prior-mean linear`` detrends on the
+CONCATENATED embedding (gp2Scale Eq. 2). Per-channel signal variances are frozen at
+var(y)/n_channels by default (diagonal = var(y)); ``--train`` optimises them by
+marginal likelihood (the principled auto-weighting -- avoids the equal-split dilution
+seen at 10k).
 """
 
 from __future__ import annotations
@@ -35,72 +27,84 @@ import time
 
 import numpy as np
 
-from .cutoff import recalibrate, sparsity_report
-from .pipeline import (build_gp, predict, release_gp, sort_by_category,
-                       with_category_tag, WLGPPipeline)
-from .reduce import regression_r2
+from .cutoff import cutoff_for_neighbors, recalibrate, sparsity_report
+from .pipeline import (GeometryPipeline, WLGPPipeline, build_gp, predict,
+                       release_gp, sort_by_category, train_hyperparameters,
+                       with_category_tag)
+from .reduce import LinearEmbeddingMean, regression_r2
+
+CHANNEL_CODE = {"wl": 0, "geom": 1, "additive": 2}   # numeric tag for the --out rows
 
 
-def _one_gp_r2(Z_tr, y_tr, cat_tr, Z_te, y_te, cat_te, cutoff, dim, client, args):
-    """Build a frozen-hp gp2Scale GP on the dim-sliced embedding, predict test mean,
-    return predictive R^2. Category-tagged + sorted so cross-category blocks skip.
+def _channel_cutoff(Z_tr, Z_te, cat_tr, cat_te, args):
+    """Per-channel compact-support radius: tuned to ~--target-neighbors (default), else
+    the --cutoff-pct percentile of this channel's own pairwise distances."""
+    if args.target_neighbors:
+        return cutoff_for_neighbors(
+            Z_tr, Z_te, args.target_neighbors, dim=Z_tr.shape[1],
+            data_id_tr=cat_tr, data_id_te=cat_te,
+        )
+    c, _ = recalibrate(Z_tr, percentile=args.cutoff_pct, dim=Z_tr.shape[1])
+    return c
 
-    TEST must carry its REAL categories: the kernel zeroes cross-category covariance,
-    so a test molecule tagged with the wrong category draws only on training molecules
-    of that wrong category -> its posterior mean collapses to the prior. (Tagging all
-    test rows with a single dummy category is only valid when TRAIN uses that same
-    single category, as in validate.sparse_vs_dense_parity.)
 
-    ``--prior-mean linear`` fits an OLS mean on the embedding, has the GP model the
-    residual y - m(z), and adds m(z*) back to the prediction (gp2Scale Eq. 2 with a
-    linear m). This makes uncovered test points revert to the OLS prediction instead
-    of 0, fixing the compact-support mean reversion."""
+def _gp_r2_channels(chan, y_tr, cat_tr, y_te, cat_te, client, args):
+    """Build a frozen (or --train'd) additive gp2Scale GP over the given channels and
+    return held-out R^2. ``chan`` is a list of {"Ztr","Zte","cutoff"} dicts; the kernel
+    sums one Wendland block per channel on its own column range/cutoff. Category-tagged +
+    sorted; ``--prior-mean linear`` detrends on the concatenated embedding and adds the
+    OLS mean back (fixes compact-support mean reversion)."""
     from sklearn.metrics import r2_score
 
-    from .reduce import LinearEmbeddingMean
+    Ztr = np.hstack([c["Ztr"] for c in chan])
+    Zte = np.hstack([c["Zte"] for c in chan])
+    specs, off = [], 0                                # (start, stop, cutoff) per channel
+    for c in chan:
+        d = c["Ztr"].shape[1]
+        specs.append((off, off + d, float(c["cutoff"])))
+        off += d
 
-    Ztr_d, Zte_d = Z_tr[:, :dim], Z_te[:, :dim]
     if getattr(args, "prior_mean", "none") == "linear":
-        mean = LinearEmbeddingMean().fit(Ztr_d, y_tr)
-        y_fit = y_tr - mean.predict(Ztr_d)          # GP models the residual
+        mean = LinearEmbeddingMean().fit(Ztr, y_tr)
+        y_fit = y_tr - mean.predict(Ztr)              # GP models the residual
     else:
         mean, y_fit = None, y_tr
 
-    Xtr = with_category_tag(Ztr_d, cat_tr)
-    Xtr, y_fit_s, _ = sort_by_category(Xtr, y_fit)  # sort residual consistently
-    Xte = with_category_tag(Zte_d, cat_te)
-    sv = float(np.var(y_fit))                       # signal var of what the GP models
+    Xtr = with_category_tag(Ztr, cat_tr)
+    Xtr, y_fit_s, _ = sort_by_category(Xtr, y_fit)
+    Xte = with_category_tag(Zte, cat_te)
+    C = len(specs)
+    var = float(np.var(y_fit))
+    signal_var = [var / C] * C                        # equal split -> diagonal = var(y)
 
     t0 = time.time()
     gp, _ = build_gp(
-        Xtr, y_fit_s, cutoff, dim, client,
-        signal_var=sv, jitter=args.jitter, batch_size=args.batch_size,
+        Xtr, y_fit_s, None, None, client,
+        channels=specs, signal_var=signal_var,
+        jitter=args.jitter, batch_size=args.batch_size,
         compute_device="cpu", device=args.device, linalg_mode=args.linalg,
         cg_maxiter=args.cg_maxiter, cg_tol=args.cg_tol,
     )
-    t_build = time.time() - t0                       # kernel build + logdet + KVinvY solve
-    t1 = time.time()
+    if getattr(args, "train", False):
+        bounds = [[1e-6, 10.0 * var]] * C             # per-channel signal-var bounds
+        hps = train_hyperparameters(gp, bounds, max_iter=args.train_iter)
+        print(f"[sweep]   trained signal vars -> {np.round(np.asarray(hps), 5)}")
+    t_build = time.time() - t0
     m, _ = predict(gp, Xte, batch=args.pred_batch, variance=False)
-    t_pred = time.time() - t1
     if mean is not None:
-        m = m + mean.predict(Zte_d)                 # add the linear mean back (Eq. 2)
+        m = m + mean.predict(Zte)                     # add the linear mean back
     r2 = float(r2_score(y_te, m))
-    print(f"[sweep]   timing: build(+solve+logdet)={t_build:.1f}s  predict={t_pred:.1f}s")
+    print(f"[sweep]   build(+solve){'+train' if args.train else ''}={t_build:.1f}s")
     del gp
     release_gp(client)
     return r2
 
 
-def _cutoffs_for_dim(Z_tr, d, args):
-    """Cutoffs to test at embedding dim ``d``. Precedence: --cutoffs (an absolute
-    sweep, reusing the embedding) > --cutoff (single absolute) > --cutoff-pct (one
-    per-dim percentile of the pairwise distances, the legacy default)."""
-    if args.cutoffs:
-        return [float(c) for c in args.cutoffs]
-    if args.cutoff is not None:
-        return [float(args.cutoff)]
-    c, _ = recalibrate(Z_tr[:, :d], percentile=args.cutoff_pct, dim=d)
-    return [float(c)]
+def _ols_r2(chan, y_tr, y_te):
+    """Cross-check: held-out OLS R^2 on the concatenated embedding (cutoff-free)."""
+    Ztr = np.hstack([c["Ztr"] for c in chan])
+    Zte = np.hstack([c["Zte"] for c in chan])
+    return regression_r2(Ztr, y_tr, Zte, y_te)
 
 
 def run(args, client):
@@ -109,10 +113,13 @@ def run(args, client):
     from .data import get_data
 
     ds = get_data(src=args.src, n=args.n, seed=args.data_seed)
-    dims = sorted({int(d) for d in args.dims})
+    modes = args.channels
+    need_wl = any(m in ("wl", "additive") for m in modes)
+    need_geom = any(m in ("geom", "additive") for m in modes)
     rows = []
-    print(f"[sweep] config: scaling={args.scaling} prior_mean={args.prior_mean} "
-          f"jitter={args.jitter:g} linalg={args.linalg} dims={dims}")
+    print(f"[sweep] config: channels={modes} scaling={args.scaling} "
+          f"prior_mean={args.prior_mean} target_nbrs={args.target_neighbors} "
+          f"train={args.train} pls={args.pls} jitter={args.jitter:g} linalg={args.linalg}")
 
     for seed in args.seeds:
         print(f"\n########## split seed {seed} ##########")
@@ -123,90 +130,106 @@ def run(args, client):
         y_tr, y_te = ds.y[tr], ds.y[te]
         cat_tr, cat_te = ds.data_id[tr], ds.data_id[te]
 
-        # one embedding per seed; dims slice it. vocab_sample=0 -> vocab on ALL train.
-        pipe = WLGPPipeline(
-            depth=args.depth, min_count=args.min_count,
-            pls_components=args.pls, cutoff_percentile=None,  # we sweep the cutoff
-            scaling=args.scaling, vocab_sample=0,
-        )
-        Z_tr = pipe.fit(atoms_tr, y_tr, cat_tr, client=client)
-        Z_te = pipe.transform(atoms_te, client=client)
+        emb = {}   # channel name -> {"Ztr","Zte","cutoff"}
+        if need_wl:
+            pw = WLGPPipeline(depth=args.depth, min_count=args.min_count,
+                              pls_components=args.pls, cutoff_percentile=None,
+                              scaling=args.scaling, vocab_sample=0)
+            Zw_tr = pw.fit(atoms_tr, y_tr, cat_tr, client=client)
+            Zw_te = pw.transform(atoms_te, client=client)
+            emb["wl"] = {"Ztr": Zw_tr, "Zte": Zw_te,
+                         "cutoff": _channel_cutoff(Zw_tr, Zw_te, cat_tr, cat_te, args)}
+        if need_geom:
+            pg = GeometryPipeline(top_k=args.geom_top_k, channels=tuple(args.geom_channels),
+                                  r_max=args.geom_r_max, pls_components=args.pls,
+                                  cutoff_percentile=None, scaling=args.scaling,
+                                  charge_key=args.charge_key)
+            Zg_tr = pg.fit(atoms_tr, y_tr, cat_tr, client=client)
+            Zg_te = pg.transform(atoms_te, client=client)
+            emb["geom"] = {"Ztr": Zg_tr, "Zte": Zg_te,
+                           "cutoff": _channel_cutoff(Zg_tr, Zg_te, cat_tr, cat_te, args)}
 
-        for d in dims:
-            # OLS R^2 is cutoff-INDEPENDENT (linear probe on Z[:, :d]) -> compute once
-            # per dim and reuse across every cutoff. The GP kernel is the only thing that
-            # changes with the cutoff, so the whole embedding (featurise + PLS) is reused.
-            ols = regression_r2(Z_tr[:, :d], y_tr, Z_te[:, :d], y_te)
-            for cutoff in _cutoffs_for_dim(Z_tr, d, args):
-                rep = sparsity_report(Z_tr[:, :d], cutoff, dim=d, data_id=cat_tr)
-                gp_r2 = _one_gp_r2(Z_tr, y_tr, cat_tr, Z_te, y_te, cat_te, cutoff, d,
-                                   client, args)
-                print(f"[sweep] seed={seed} dim={d:>2}  cutoff={cutoff:.4f}  "
-                      f"median_nbr={rep['median_neighbors']:.0f}  "
-                      f"density={rep['density']:.2e}  OLS_R2={ols:.4f}  GP_R2={gp_r2:.4f}")
-                rows.append((seed, d, cutoff, rep['median_neighbors'], ols, gp_r2))
+        for mode in modes:
+            chan = ([emb["wl"]] if mode == "wl"
+                    else [emb["geom"]] if mode == "geom"
+                    else [emb["wl"], emb["geom"]])
+            for c in chan:
+                sparsity_report(c["Ztr"], c["cutoff"], dim=c["Ztr"].shape[1], data_id=cat_tr)
+            ols = _ols_r2(chan, y_tr, y_te)
+            gp_r2 = _gp_r2_channels(chan, y_tr, cat_tr, y_te, cat_te, client, args)
+            cuts = "+".join(f"{c['cutoff']:.3f}" for c in chan)
+            print(f"[sweep] seed={seed} mode={mode:>8}  cutoffs={cuts}  "
+                  f"OLS_R2={ols:.4f}  GP_R2={gp_r2:.4f}")
+            rows.append((seed, CHANNEL_CODE[mode], ols, gp_r2))
 
     print("\n================= SUMMARY =================")
-    print(f"{'seed':>5} {'dim':>4} {'cutoff':>8} {'med_nbr':>8} {'OLS_R2':>8} {'GP_R2':>8}")
-    for s, d, c, nb, ols, gp in rows:
-        print(f"{s:>5} {d:>4} {c:>8.4f} {nb:>8.0f} {ols:>8.4f} {gp:>8.4f}")
-    # mean/std across seeds, by (dim, cutoff). For an absolute cutoff sweep the cutoff
-    # is identical across seeds so each group has one value per seed; for the percentile
-    # default the recalibrated cutoff varies slightly per seed (groups of ~1).
-    print("\n--- GP_R2 across seeds, by (dim, cutoff) ---")
-    for (d, c) in sorted({(dd, round(cc, 4)) for (s, dd, cc, nb, ols, gp) in rows}):
-        vals = np.array([gp for (s, dd, cc, nb, ols, gp) in rows
-                         if dd == d and round(cc, 4) == c])
-        print(f"  dim={d:>2} cutoff={c:>7.4f}: GP_R2 mean={vals.mean():.4f}  "
-              f"std={vals.std():.4f}  n={len(vals)}  values={np.round(vals,4)}")
+    print(f"{'seed':>5} {'mode':>9} {'OLS_R2':>8} {'GP_R2':>8}")
+    inv = {v: k for k, v in CHANNEL_CODE.items()}
+    for s, code, ols, gp in rows:
+        print(f"{s:>5} {inv[int(code)]:>9} {ols:>8.4f} {gp:>8.4f}")
+    print("\n--- GP_R2 across seeds, by channel ---")
+    for mode in modes:
+        vals = np.array([gp for (s, code, ols, gp) in rows if int(code) == CHANNEL_CODE[mode]])
+        if len(vals):
+            print(f"  {mode:>8}: GP_R2 mean={vals.mean():.4f}  std={vals.std():.4f}  "
+                  f"n={len(vals)}  values={np.round(vals, 4)}")
     if args.out:
         np.savez(args.out, rows=np.array(rows, dtype=float),
-                 dims=np.array(dims), seeds=np.array(args.seeds))
+                 channels=np.array(modes), seeds=np.array(args.seeds),
+                 channel_code=np.array([CHANNEL_CODE[m] for m in modes]))
         print(f"\n[sweep] wrote {args.out}")
 
 
 def main():
-    ap = argparse.ArgumentParser(description="wl_gp2scale embedding-dim x seed sweep")
+    ap = argparse.ArgumentParser(description="wl_gp2scale channel comparison (wl | geom | additive)")
     ap.add_argument("--src", default="train_4M")
     ap.add_argument("--n", type=int, default=20_000)
     ap.add_argument("--data-seed", type=int, default=0, help="subset draw seed (frozen in cache)")
     ap.add_argument("--seeds", type=int, nargs="+", default=[42, 7, 123],
                     help="TRAIN/TEST split seeds (the stability axis)")
-    ap.add_argument("--dims", type=int, nargs="+", default=[4, 10])
-    ap.add_argument("--pls", type=int, default=10, help="PLS components fit (>= max dim)")
+    ap.add_argument("--channels", nargs="+", default=["wl", "geom", "additive"],
+                    choices=["wl", "geom", "additive"],
+                    help="which channel modes to evaluate (embeddings built once, reused)")
+    ap.add_argument("--pls", type=int, default=10, help="PLS components per channel")
     ap.add_argument("--scaling", default="pareto",
                     choices=["pareto", "standard", "center"],
                     help="SparsePLS column pre-weighting (default pareto)")
-    ap.add_argument("--prior-mean", default="none", choices=["none", "linear"],
-                    help="GP prior mean: 'linear' fits OLS on the embedding, GPs the "
+    ap.add_argument("--prior-mean", default="linear", choices=["none", "linear"],
+                    help="'linear' fits OLS on the (concatenated) embedding, GPs the "
                          "residual, adds it back (gp2Scale Eq. 2; fixes mean reversion)")
+    ap.add_argument("--target-neighbors", type=int, default=60,
+                    help="per-channel cutoff tuned to this median in-support neighbour "
+                         "count (0 -> fall back to --cutoff-pct)")
+    ap.add_argument("--cutoff-pct", type=float, default=25.0,
+                    help="fallback percentile per channel when --target-neighbors 0")
+    ap.add_argument("--train", action="store_true",
+                    help="optimise per-channel signal variances by marginal likelihood "
+                         "(default frozen at var(y)/n_channels)")
+    ap.add_argument("--train-iter", type=int, default=50)
+    # geometry channel
+    ap.add_argument("--geom-channels", default="rdf,angle,torsion,elec",
+                    help="comma-separated subset of rdf,angle,torsion,elec")
+    ap.add_argument("--geom-top-k", type=int, default=6)
+    ap.add_argument("--geom-r-max", type=float, default=6.0)
+    ap.add_argument("--charge-key", default="lowdin_charges")
+    # WL channel
     ap.add_argument("--test-size", type=float, default=0.2)
     ap.add_argument("--min-count", type=int, default=2)
     ap.add_argument("--depth", type=int, default=3)
-    ap.add_argument("--cutoff-pct", type=float, default=25.0)
-    ap.add_argument("--cutoffs", type=float, nargs="+", default=None,
-                    help="sweep these ABSOLUTE cutoffs, reusing the embedding (built "
-                         "once per seed) across all of them; overrides --cutoff / "
-                         "--cutoff-pct. e.g. --cutoffs 0.16 0.22 0.28 0.35 0.44")
-    ap.add_argument("--cutoff", type=float, default=None,
-                    help="absolute compact-support radius; overrides --cutoff-pct "
-                         "(applied to every --dims slice)")
+    # solver / cluster
     ap.add_argument("--jitter", type=float, default=1e-6)
     ap.add_argument("--batch-size", type=int, default=10_000)
     ap.add_argument("--pred-batch", type=int, default=2000)
     ap.add_argument("--linalg", default="sparseCG")
     ap.add_argument("--cg-maxiter", type=int, default=None,
-                    help="cap CG iterations so an ill-conditioned split fails fast "
-                         "(fvgp warns 'CG not successful') instead of grinding")
-    ap.add_argument("--cg-tol", type=float, default=None,
-                    help="CG relative tolerance (fvgp sparse_cg_tol; default 1e-5)")
+                    help="cap CG iterations so an ill-conditioned split fails fast")
+    ap.add_argument("--cg-tol", type=float, default=None, help="CG relative tolerance")
     ap.add_argument("--device", default="cuda", help="OUR kernel's torch device")
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--scheduler-file", default=None)
     ap.add_argument("--out", default=None, help="optional .npz of the summary rows")
     args = ap.parse_args()
-    if max(args.dims) > args.pls:
-        ap.error(f"--dims max {max(args.dims)} exceeds --pls {args.pls}")
+    args.geom_channels = [c.strip() for c in args.geom_channels.split(",") if c.strip()]
 
     if args.scheduler_file:
         from .pipeline import connect_dask
