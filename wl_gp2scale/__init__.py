@@ -19,18 +19,23 @@ Public API
     validate.*                              pre-run checklist
 """
 
-from . import cutoff, data, kernel, pipeline, reduce, wl_features  # noqa: F401
-from .cutoff import recalibrate, sparsity_report  # noqa: F401
+from . import (cutoff, data, geometry_features, kernel, pipeline, reduce,  # noqa: F401
+               wl_features)
+from .cutoff import cutoff_for_neighbors, recalibrate, sparsity_report  # noqa: F401
 from .data import Dataset, get_data, stratified_sample_indices  # noqa: F401
-from .kernel import check_kernel_psd, make_wl_block_kernel  # noqa: F401
-from .pipeline import WLGPPipeline, build_gp, connect_dask, predict  # noqa: F401
+from .geometry_features import SparseGeometryFeaturizer  # noqa: F401
+from .kernel import (check_kernel_psd, make_additive_kernel,  # noqa: F401
+                     make_wl_block_kernel)
+from .pipeline import (GeometryPipeline, WLGPPipeline, build_gp,  # noqa: F401
+                       connect_dask, predict)
 from .reduce import SparsePLS  # noqa: F401
 from .wl_features import SparseWLFeaturizer  # noqa: F401
 
 __all__ = [
-    "data", "wl_features", "reduce", "kernel", "cutoff", "pipeline",
+    "data", "wl_features", "geometry_features", "reduce", "kernel", "cutoff", "pipeline",
     "get_data", "Dataset", "stratified_sample_indices",
-    "SparseWLFeaturizer", "SparsePLS", "make_wl_block_kernel",
-    "check_kernel_psd", "recalibrate", "sparsity_report",
-    "WLGPPipeline", "build_gp", "predict", "connect_dask",
+    "SparseWLFeaturizer", "SparseGeometryFeaturizer", "SparsePLS",
+    "make_wl_block_kernel", "make_additive_kernel",
+    "check_kernel_psd", "recalibrate", "cutoff_for_neighbors", "sparsity_report",
+    "WLGPPipeline", "GeometryPipeline", "build_gp", "predict", "connect_dask",
 ]

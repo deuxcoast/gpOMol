@@ -64,6 +64,18 @@ def build_argparser():
     ap.add_argument("--min-count", type=int, default=5)
     ap.add_argument("--depth", type=int, default=3)
     ap.add_argument("--pls", type=int, default=10)
+    # channel selection (wl = graph; geom = 3D geometry+charge; additive = k_WL + k_geom)
+    ap.add_argument("--channel", default="wl", choices=["wl", "geom", "additive"],
+                    help="which kernel channel(s) to run (additive = k_WL + k_geom)")
+    ap.add_argument("--target-neighbors", type=int, default=0,
+                    help="per-channel cutoff tuned to this median neighbour count; "
+                         "0 = keep the WL --cutoff/--cutoff-pct path (recommended 60 for "
+                         "the geom/additive comparison)")
+    ap.add_argument("--geom-channels", default="rdf,angle,torsion,elec",
+                    help="geometry: comma-separated subset of rdf,angle,torsion,elec")
+    ap.add_argument("--geom-top-k", type=int, default=6)
+    ap.add_argument("--geom-r-max", type=float, default=6.0)
+    ap.add_argument("--charge-key", default="lowdin_charges")
     ap.add_argument("--cutoff-pct", type=float, default=25.0)
     ap.add_argument("--cutoff", type=float, default=None,
                     help="absolute compact-support radius (embedding units); OVERRIDES "
@@ -125,11 +137,11 @@ def main():
     from sklearn.metrics import r2_score
     from sklearn.model_selection import train_test_split
 
-    from .cutoff import sparsity_report
+    from .cutoff import cutoff_for_neighbors, sparsity_report
     from .data import get_data
     from .pipeline import (
-        WLGPPipeline, build_gp, connect_dask, predict, sort_by_category,
-        train_hyperparameters, with_category_tag,
+        GeometryPipeline, WLGPPipeline, build_gp, connect_dask, predict,
+        sort_by_category, train_hyperparameters, with_category_tag,
     )
 
     args = build_argparser().parse_args()
@@ -151,15 +163,46 @@ def main():
 
     client = connect_dask(args.scheduler_file, n_workers=args.workers)
 
-    pipe = WLGPPipeline(
-        depth=args.depth, min_count=args.min_count, pls_components=args.pls,
-        cutoff_percentile=args.cutoff_pct, cutoff_abs=args.cutoff,
-        vocab_sample=args.vocab_sample,
-    )
-    Z_tr = pipe.fit(atoms_tr, y_tr, cat_tr, client=client, chunk=args.chunk)
-    Z_te = pipe.transform(atoms_te, client=client, chunk=args.chunk)
-    cutoff = pipe.cutoff_
-    dim = pipe.dim_
+    # -- build the requested channel embedding(s) --------------------------------
+    # WL and geometry each get their own natural-scaled PLS embedding + compact-support
+    # cutoff; the additive kernel (build_gp channels=) sums one Wendland block per
+    # channel. A single channel routes through the additive kernel too -- it is
+    # byte-identical to the WLBlockKernel (validated), so --channel wl is unchanged.
+    geom_channels = [c.strip() for c in args.geom_channels.split(",") if c.strip()]
+    chan = []  # list of {"Ztr","Zte","cutoff"}
+    if args.channel in ("wl", "additive"):
+        pw = WLGPPipeline(
+            depth=args.depth, min_count=args.min_count, pls_components=args.pls,
+            cutoff_percentile=(None if args.target_neighbors else args.cutoff_pct),
+            cutoff_abs=args.cutoff, vocab_sample=args.vocab_sample,
+        )
+        Zw_tr = pw.fit(atoms_tr, y_tr, cat_tr, client=client, chunk=args.chunk)
+        Zw_te = pw.transform(atoms_te, client=client, chunk=args.chunk)
+        cw = (cutoff_for_neighbors(Zw_tr, Zw_te, args.target_neighbors,
+                                   dim=Zw_tr.shape[1], data_id_tr=cat_tr, data_id_te=cat_te)
+              if args.target_neighbors else pw.cutoff_)
+        chan.append({"Ztr": Zw_tr, "Zte": Zw_te, "cutoff": cw})
+    if args.channel in ("geom", "additive"):
+        pg = GeometryPipeline(
+            top_k=args.geom_top_k, channels=tuple(geom_channels), r_max=args.geom_r_max,
+            pls_components=args.pls, cutoff_percentile=None, charge_key=args.charge_key,
+        )
+        Zg_tr = pg.fit(atoms_tr, y_tr, cat_tr, client=client, chunk=args.chunk)
+        Zg_te = pg.transform(atoms_te, client=client, chunk=args.chunk)
+        # geometry has no historical cutoff-pct convention -> always neighbour-tuned
+        # (default 60, matching descriptor_eval).
+        cg = cutoff_for_neighbors(Zg_tr, Zg_te, args.target_neighbors or 60,
+                                  dim=Zg_tr.shape[1], data_id_tr=cat_tr, data_id_te=cat_te)
+        chan.append({"Ztr": Zg_tr, "Zte": Zg_te, "cutoff": cg})
+
+    Z_tr = np.hstack([c["Ztr"] for c in chan])
+    Z_te = np.hstack([c["Zte"] for c in chan])
+    specs, off = [], 0                                # (start, stop, cutoff) per channel
+    for c in chan:
+        d = c["Ztr"].shape[1]
+        specs.append((off, off + d, float(c["cutoff"])))
+        off += d
+    dim = Z_tr.shape[1]
 
     # optional linear prior mean (gp2Scale Eq. 2 with linear m): the GP models the
     # residual y - m(z) and predictions add m(z*) back, so uncovered test points revert
@@ -180,18 +223,28 @@ def main():
 
     # Know the memory bill BEFORE paying it: fvgp gathers every COO component to the
     # DRIVER and builds one scipy CSR there (gp_prior.py:294-306), so this number --
-    # not worker RAM -- is what can kill the run.
-    rep = sparsity_report(Z_tr, cutoff, dim=dim, data_id=cat_tr)
+    # not worker RAM -- is what can kill the run. Report per channel.
+    for c in chan:
+        sparsity_report(c["Ztr"], c["cutoff"], dim=c["Ztr"].shape[1], data_id=cat_tr)
     n_blocks = max(1, len(X_tr) // args.batch_size)
+    print(f"[run] channel={args.channel}  specs={specs}")
     print(f"[run] gp2Scale: {n_blocks} batches -> ~{n_blocks*(n_blocks+1)//2} blocks "
-          f"over {args.workers} workers; driver-side CSR ~{rep['est_gb']:.1f} GB "
-          f"(assembly peak roughly 3x that)")
+          f"over {args.workers} workers")
+
+    # per-channel signal variances: frozen equal split (diagonal = var(y_fit)), or the
+    # single --signal-var if given; --train optimises them by marginal likelihood.
+    C = len(specs)
+    if args.signal_var is not None:
+        signal_var = [float(args.signal_var) / C] * C
+    else:
+        signal_var = None                             # build_gp -> var(y_fit)/C each
 
     print("[run] building gp2Scale GP (this includes the unavoidable imate logdet) ...")
     t_gp = time.time()
     gp, kern = build_gp(
-        X_tr, y_fit, cutoff, dim, client,
-        signal_var=args.signal_var, jitter=args.jitter, batch_size=args.batch_size,
+        X_tr, y_fit, None, dim, client,
+        channels=specs, signal_var=signal_var,
+        jitter=args.jitter, batch_size=args.batch_size,
         backend=args.backend, linalg_mode=args.linalg,
         compute_device=args.compute_device,
         device=args.device,
@@ -204,7 +257,7 @@ def main():
 
     if args.train:
         sv0 = float(args.signal_var or np.var(y_fit))
-        bounds = np.array([[1e-3, max(10 * sv0, 1e-2)]])
+        bounds = np.array([[1e-3, max(10 * sv0, 1e-2)]] * C)
         print("[run] marginal-likelihood training (requires imate) ...")
         hps = train_hyperparameters(gp, bounds, max_iter=50)
         print(f"[run] trained hyperparameters: {hps}")
@@ -227,7 +280,9 @@ def main():
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     np.savez(
-        args.out, y_true=y_te, y_pred=E_pred_resid, var=v, cutoff=cutoff,
+        args.out, y_true=y_te, y_pred=E_pred_resid, var=v,
+        channel=args.channel, cutoffs=np.array([c["cutoff"] for c in chan]),
+        channel_specs=np.array(specs, dtype=float),
         r2=r2, rmse=rmse, signal_var=float(args.signal_var or np.var(y_fit)),
         prior_mean=args.prior_mean,
         dim=dim, min_count=args.min_count, depth=args.depth, pls=args.pls,

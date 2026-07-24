@@ -43,6 +43,35 @@ def suggest_percentile(n, target_neighbors=50, frac_same_category=1.0):
     return pct
 
 
+def cutoff_for_neighbors(Z_tr, Z_te, target_neighbors=60, dim=None,
+                         data_id_tr=None, data_id_te=None, sample=5000, seed=0):
+    """Compact-support radius tuned to a median in-support NEIGHBOUR COUNT rather than
+    a distance percentile. Percentile is the wrong knob here: the embedding is clustered
+    (near-duplicate molecules), so the in-support fraction (a MEAN quantity) badly
+    overshoots the MEDIAN neighbour count -- e.g. pct 1.0 -> 55 median neighbours at
+    16k, not 160. This returns the median over (sampled) test points of the distance to
+    the ``target_neighbors``-th nearest SAME-CATEGORY train point, so a typical point
+    sees ~target neighbours after the category mask. Matches the neighbour-count tuning
+    validated in descriptor_eval."""
+    Z_tr = np.asarray(Z_tr, dtype=float)
+    Z_te = np.asarray(Z_te, dtype=float)
+    if dim is not None:
+        Z_tr, Z_te = Z_tr[:, :dim], Z_te[:, :dim]
+    rng = np.random.default_rng(seed)
+    ti = rng.choice(len(Z_te), size=min(sample, len(Z_te)), replace=False)
+    D = cdist(Z_te[ti], Z_tr)
+    if data_id_tr is not None and data_id_te is not None:
+        same = np.asarray(data_id_te)[ti][:, None] == np.asarray(data_id_tr)[None, :]
+        D = np.where(same, D, np.inf)                 # only same-category peers count
+    k = min(int(target_neighbors), D.shape[1] - 1)
+    kth = np.partition(D, k, axis=1)[:, k]            # dist to the (k+1)-th nearest
+    kth = kth[np.isfinite(kth)]
+    cutoff = float(np.median(kth)) if len(kth) else float("inf")
+    print(f"[cutoff] target ~{target_neighbors} nbrs -> cutoff {cutoff:.4f} "
+          f"(median {target_neighbors}-th nearest same-category train distance)")
+    return cutoff
+
+
 def recalibrate(
     Z, percentile: float = 25.0, sample: int = 5000, seed: int = 0, dim=None
 ):

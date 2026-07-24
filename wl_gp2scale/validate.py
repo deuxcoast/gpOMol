@@ -10,6 +10,9 @@ BEFORE the full 200k run:
   3. CG convergence           -- sparseCG converges at jitter 1e-6.
   4. Streaming-PLS parity     -- streaming SIMPLS R^2 == batch PLSRegression R^2.
   5. PD guard                 -- min eigenvalue of a subsample Gram > -tol.
+  6. Additive-kernel parity   -- 1-channel additive == WLBlockKernel; 2-channel ==
+                                 sum of dense references (protects the numerics when
+                                 combining WL + geometry).
 
 Checks 1 and 3 use a SINGLE dummy category so the category mask is a no-op and the
 sparse/GPU machinery is compared against the dense reference in isolation.
@@ -168,6 +171,66 @@ def psd_guard(Z_sample, cutoff, backend="wendland32", tol=1e-8):
     return res
 
 
+# ----------------------------- 6: additive-kernel parity -------------------
+
+
+def additive_kernel_guard(Z_sample, cutoff, cat_sample=None, tol=1e-10):
+    """Guard the AdditiveWendlandKernel against the proven single-block kernel.
+    Pure-numpy (CPU), no gp2Scale needed:
+      (a) a ONE-channel additive kernel is byte-identical to WLBlockKernel -- protects
+          the conditioning-critical numerics (donot_use_mm cdist, float64) on the
+          near-singular Gram;
+      (b) a TWO-channel additive kernel equals the sum of two dense Wendland references
+          (different per-channel cutoffs), masked by category;
+      (c) the diagonal is exactly sum_c sv_c;
+      (d) cross-category pairs are zeroed."""
+    from .kernel import (AdditiveWendlandKernel, ChannelSpec, WLBlockKernel,
+                         dense_wendland_reference)
+
+    Z = np.asarray(Z_sample, float)
+    n, D = Z.shape
+    cat = np.zeros(n) if cat_sample is None else np.asarray(cat_sample, float)[:n]
+    x = np.hstack([Z, cat[:, None]])
+
+    # (a) single channel == WLBlockKernel
+    wl = WLBlockKernel(cutoff=cutoff, dim=D, use_category_tag=True, device="cpu")
+    add1 = AdditiveWendlandKernel(channels=[ChannelSpec(0, D, cutoff)], device="cpu")
+    Kw = wl(x, x, np.array([2.0]))
+    Ka = add1(x, x, np.array([2.0]))
+    a_diff = float(np.max(np.abs(Kw - Ka)))
+    a_ok = bool(np.array_equal(Kw, Ka))
+
+    # (b) two channels == sum of two masked dense refs (distinct cutoffs)
+    d0 = D // 2 or 1
+    c1 = 1.3 * cutoff
+    add2 = AdditiveWendlandKernel(
+        channels=[ChannelSpec(0, d0, cutoff), ChannelSpec(d0, D, c1)], device="cpu")
+    sv0, sv1 = 1.3, 0.7
+    K2 = add2(x, x, np.array([sv0, sv1]))
+    mask = (cat[:, None] == cat[None, :]).astype(float)
+    ref = (sv0 * dense_wendland_reference(Z[:, :d0], Z[:, :d0], [1.0], cutoff)
+           + sv1 * dense_wendland_reference(Z[:, d0:], Z[:, d0:], [1.0], c1)) * mask
+    b_diff = float(np.max(np.abs(K2 - ref)))
+    b_ok = b_diff <= tol
+
+    # (c) diagonal == sv0 + sv1
+    c_ok = bool(np.allclose(np.diag(K2), sv0 + sv1, atol=1e-9))
+
+    # (d) cross-category zeroed
+    i, j = np.where(cat[:, None] != cat[None, :])
+    d_ok = (i.size == 0) or bool(np.allclose(K2[i, j], 0.0))
+
+    ok = a_ok and b_ok and c_ok and d_ok
+    print(
+        f"[val] additive kernel: (a) ==WLBlock diff={a_diff:.1e} {'ok' if a_ok else 'FAIL'} | "
+        f"(b) ==sum-dense diff={b_diff:.1e} {'ok' if b_ok else 'FAIL'} | "
+        f"(c) diag {'ok' if c_ok else 'FAIL'} | (d) cat-mask {'ok' if d_ok else 'FAIL'} "
+        f"-> {'PASS' if ok else 'FAIL'}"
+    )
+    return {"a_wlblock": a_ok, "b_sum_dense": b_ok, "c_diag": c_ok,
+            "d_catmask": d_ok, "pass": ok}
+
+
 # ----------------------------- CLI driver ----------------------------------
 
 
@@ -239,9 +302,13 @@ def main():
     sparsity(Z_tr, cutoff, dim=Z_tr.shape[1], data_id=cat_tr)
 
     # 5: PD guard (both backends) + exact-diagonal regression guard
-    psd_guard(Z_tr[: min(1500, len(Z_tr))], cutoff, backend="wendland32")
-    psd_guard(Z_tr[: min(1500, len(Z_tr))], cutoff, backend="wendland_d0")
-    diagonal_guard(Z_tr[: min(1500, len(Z_tr))], cutoff, float(np.var(y_tr)))
+    ns = min(1500, len(Z_tr))
+    psd_guard(Z_tr[:ns], cutoff, backend="wendland32")
+    psd_guard(Z_tr[:ns], cutoff, backend="wendland_d0")
+    diagonal_guard(Z_tr[:ns], cutoff, float(np.var(y_tr)))
+
+    # 6: additive-kernel parity (one channel == WLBlockKernel; two == sum of refs)
+    additive_kernel_guard(Z_tr[:ns], cutoff, cat_sample=cat_tr[:ns])
 
     # 1 + 3: parity + CG on a parity-sized slice, single dummy category
     k = min(args.parity_n, len(Z_tr))

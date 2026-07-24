@@ -20,7 +20,8 @@ import numpy as np
 
 from .cutoff import recalibrate
 from .data import stratified_sample_indices
-from .kernel import make_wl_block_kernel
+from .geometry_features import SparseGeometryFeaturizer
+from .kernel import make_additive_kernel, make_wl_block_kernel
 from .reduce import SparsePLS
 from .wl_features import SparseWLFeaturizer
 
@@ -92,6 +93,56 @@ class WLGPPipeline:
             )
         else:
             self.cutoff_ = None   # caller supplies the cutoff (e.g. dim_sweep sweeps it)
+        return Z_tr
+
+    def transform(self, atoms, client=None, chunk=500):
+        X = self.featurizer.transform(atoms, client=client, chunk=chunk)
+        return self.reducer.transform(X)
+
+
+@dataclass
+class GeometryPipeline:
+    """Geometry+charge channel counterpart to WLGPPipeline (same fit/transform
+    interface): fit the geometry element vocab + natural-scaled SparsePLS on TRAIN,
+    recalibrate the compact-support cutoff, return the train embedding. Reuses
+    SparsePLS (natural scaling -> N-invariant cutoff) and cutoff.recalibrate so the
+    geometry channel behaves like the WL channel in the additive kernel."""
+
+    top_k: int = 6
+    channels: tuple = ("rdf", "angle", "torsion", "elec")
+    r_max: float = 6.0
+    charge_key: str = "lowdin_charges"
+    pls_components: int = 10
+    scaling: str = "pareto"
+    cutoff_percentile: float = 25.0
+    cutoff_abs: float = None
+    cutoff_mult: float = 1.2
+    # fitted state
+    featurizer: SparseGeometryFeaturizer = field(default=None, repr=False)
+    reducer: SparsePLS = field(default=None, repr=False)
+    cutoff_: float = None
+    dim_: int = None
+
+    def fit(self, atoms, y, data_id=None, client=None, chunk=500):
+        print(f"[geom-pipe] fitting geometry channel on {len(atoms):,} training molecules")
+        self.featurizer = SparseGeometryFeaturizer(
+            top_k=self.top_k, channels=tuple(self.channels), r_max=self.r_max,
+            charge_key=self.charge_key, cutoff_mult=self.cutoff_mult,
+        ).fit(atoms)
+        X_tr = self.featurizer.transform(atoms, client=client, chunk=chunk)
+        self.reducer = SparsePLS(
+            n_components=self.pls_components, scaling=self.scaling
+        ).fit(X_tr, y)
+        Z_tr = self.reducer.transform(X_tr)
+        self.dim_ = Z_tr.shape[1]
+        if self.cutoff_abs is not None:
+            self.cutoff_ = float(self.cutoff_abs)
+        elif self.cutoff_percentile is not None:
+            self.cutoff_, _ = recalibrate(
+                Z_tr, percentile=self.cutoff_percentile, dim=self.dim_
+            )
+        else:
+            self.cutoff_ = None
         return Z_tr
 
     def transform(self, atoms, client=None, chunk=500):
@@ -230,6 +281,7 @@ def build_gp(
     cg_tol=None,
     logdet_verbose=False,
     args=None,
+    channels=None,
 ):
     """Construct the gp2Scale GPOptimizer with the sparse GPU block kernel.
 
@@ -257,17 +309,30 @@ def build_gp(
     require_imate()
     from gpcam import GPOptimizer
 
-    kern = make_wl_block_kernel(
-        cutoff,
-        dim=dim,
-        use_category_tag=True,
-        backend=backend,
-        device=device,
-        dtype=dtype,
-        cutoff_is_hp=cutoff_is_hp,
-    )
-    sv = float(signal_var) if signal_var is not None else float(np.var(y_tr))
-    init_hps = np.array([sv, cutoff]) if cutoff_is_hp else np.array([sv])
+    if channels is not None:
+        # Additive N-channel kernel k = sum_c sv_c psi_c. `channels` is a list of
+        # ChannelSpec (or (start, stop, cutoff[, backend, k]) tuples); `signal_var` is
+        # the per-channel signal-variance vector (default: var(y) split equally, so the
+        # diagonal stays var(y)). hps = the C signal variances; cutoffs stay frozen.
+        kern = make_additive_kernel(
+            channels, use_category_tag=True, device=device, dtype=dtype
+        )
+        if signal_var is None:
+            init_hps = np.full(len(channels), float(np.var(y_tr)) / len(channels))
+        else:
+            init_hps = np.asarray(signal_var, dtype=float).ravel()
+    else:
+        kern = make_wl_block_kernel(
+            cutoff,
+            dim=dim,
+            use_category_tag=True,
+            backend=backend,
+            device=device,
+            dtype=dtype,
+            cutoff_is_hp=cutoff_is_hp,
+        )
+        sv = float(signal_var) if signal_var is not None else float(np.var(y_tr))
+        init_hps = np.array([sv, cutoff]) if cutoff_is_hp else np.array([sv])
 
     # fvgp computes log|KV| in the constructor unconditionally (GPkv._refresh), but
     # predict-only never READS it (only gp_marginal_likelihood.py does). Measured, it
