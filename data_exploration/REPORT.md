@@ -223,11 +223,204 @@ dataset.
 
 7. **Use Löwdin charges, and treat NBO as unavailable** for the three big subsets.
 
-## 9. Next (Pass B, `PLAN.md` steps 4–5)
+---
 
-The one number this pass could not produce is the **molecular-graph ceiling**
-itself, bracketed here at [0.53, 0.92]. It needs bond graphs: group by WL hash on a
-stratified sample and repeat §6's variance decomposition. That single measurement
-tells you how much of the 0.36 headroom WL could in principle capture with more
-data, and how much is conformational and needs geometry — which is precisely the
-question the additive-kernel work is trying to answer empirically at 200k.
+# Part II — Pass B: the structural sample
+
+Two samples, both scanned with the production bond perception
+(`build_graph(atoms, cutoff_mult=1.2)`), by `geom_sample.py`:
+
+* **stratified** — 199,999 structures, proportional-with-floor across the 10
+  subsets. The representative sample: geometry, charges, WL vocabulary.
+* **clusters** — 200,017 structures drawn as *whole* (formula, charge, spin)
+  groups, 44,054 groups in all. Within-group variance is only estimable from
+  groups with members in hand, and a uniform 5% draw shatters them.
+
+## 10. What a structure actually looks like
+
+`figures/f14_fragments_compactness.png`. **32% of `train_4M` is not a molecule —
+it is a cluster.** Per subset: biomolecules 82% multi-fragment (median 2),
+electrolytes 78% (median 5, max 43), reactivity 29%, SPICE 24%, metal complexes
+20%, GEOM 0%. For a third of the dataset the energy therefore contains an
+intermolecular term, and a bond-graph descriptor sees only a disjoint union — it
+has no representation of how the pieces are arranged relative to each other.
+
+Everything is compact: `R_g = 1.08 n^(1/3)` fits the whole size range, so there is
+no extended/chain-like population to model separately.
+
+`figures/f13_bond_geometry.png` and `figures/f15_charges.png` give the raw material
+of the geometry and elec channels. Bond-length modes come out at textbook values
+(H–C 1.09, C–C 1.39, C–N 1.45, C–O 1.43, H–N 1.01, H–O 0.97, C–S 1.81 Å) — but see
+§11 for the secondary peaks past 1.9 Å. Löwdin charges do **not** track
+electronegativity: mean charge is +0.09 e on H, −0.19 on C, −0.06 on O, +0.03 on N,
++0.71 on S, +0.55 on Cl. Anyone reading the elec channel chemically should know
+that; the median within-structure charge span is 0.85 e and its distribution is
+cleanly bimodal (neutral organics near 0.6 e, ionic systems near 1.4 e).
+
+## 11. The perceived "molecular graph" is a geometry fingerprint
+
+This is the main result of Pass B, and it was not on the plan.
+
+The ceiling measurement (§6, `descriptors.py ceiling`) grouped structures by their
+WL multiset hash — the exact equivalence class of the shipped descriptor — and
+returned a within-group variance of **0.99 eV²**, implying a ceiling of 0.99. That
+number is wrong, and the way it is wrong is informative. A **consistency check**
+catches it: same molecule ⇒ same bond graph ⇒ same WL labels, so the WL grouping
+must be *coarser* than "same molecule" and its within-variance must be *larger*.
+Measured on the same rows:
+
+| grouping | within-group variance | dof |
+|---|---|---|
+| provenance family (same molecule) | **8.74 eV²** | 12,219 |
+| WL depth-3 hash | **0.99 eV²** | 20,070 |
+
+The ordering is inverted, which is impossible for a graph invariant. **87% of
+multi-member provenance families — same molecule, different conformer — receive
+different WL hashes.** Bond perception thresholds interatomic distances, so moving
+the atoms changes the perceived bond set, and the "graph" descriptor is partly
+fingerprinting geometry.
+
+`figures/f20_graph_is_not_a_graph.png` sweeps the constant responsible. Across
+2,613 same-molecule families:
+
+| multiplier | families split | bonds/atom | median rings | acyclic |
+|---|---|---|---|---|
+| 1.00 | **37.0%** | 0.99 | 1 | 34% |
+| 1.10 | 62.4% | 1.03 | 2 | 29% |
+| **1.20 (production)** | **87.9%** | 1.19 | 7 | 11% |
+| 1.30 | 90.0% | 1.49 | 17 | 2% |
+
+No setting reaches zero, and the production value is close to the worst. The
+mechanism is visible directly in `figures/f13_bond_geometry.png`: at 1.2× the
+C–C distribution grows a second peak at **2.4 Å** and N–N's *mode* is at **2.29 Å**
+— non-bonded contacts admitted as bonds — and **41% of carbon atoms are assigned
+more than four bonds** (44% four-coordinate, 33% five, 8% six).
+
+Three consequences:
+
+1. **The [0.53, 0.92] bracket on the graph ceiling stands.** It cannot be closed
+   with this data, because no geometry-independent molecular graph exists in the
+   shards (no SMILES, no bond orders). The honest statement is the bracket plus the
+   knowledge that the WL channel is *not* confined by its upper end, since it sees
+   geometry through perception.
+2. **It explains the WL channel's instability.** A hash that changes with
+   conformation is close to unique per structure, which is exactly what §12
+   measures — and an embedding built on near-unique columns is what produces the
+   0.076 across-seed spread in the wl-only GP at 20k.
+3. **It is cheap to test.** `cutoff_mult` is one constant shared by
+   `wl_features.build_graph`, the geometry channels and the strain reference.
+   Sweeping it at production N is a small experiment with a large potential payoff,
+   and 1.1 is the value to try first: it halves the splitting and cuts the ring
+   count from 7 to 2 while barely moving bonds/atom (1.19 → 1.03).
+
+## 12. A frozen WL vocabulary never converges
+
+`figures/f16_wl_vocabulary.png`, on 60,000 structures of the stratified sample.
+
+The vocabulary grows as **N^0.91** — near-linearly, i.e. roughly one new column per
+new molecule. 1,355,778 distinct labels appear in 60k structures; 171,528 survive
+the production `min_count ≥ 2` prune; extrapolating gives ~7.8M columns at 4M. The
+growth is concentrated in the deep labels: depth 1 has 41,447 distinct labels
+(14,481 kept), depth 2 has 426,672 (66,142), depth 3 has 887,659 (90,905 kept —
+only 10% of depth-3 labels are ever seen twice).
+
+The consequence is the out-of-vocabulary rate, and it improves far too slowly to
+outrun:
+
+| vocabulary frozen on | kept columns | labels of a fresh structure that are OOV | structures fully covered |
+|---|---|---|---|
+| 2,852 | 10,788 | 48.5% | 3.2% |
+| 9,647 | 32,309 | 42.1% | 5.6% |
+| 24,058 | 74,632 | 37.7% | 8.7% |
+| 44,244 | 130,322 | **35.0%** | **10.7%** |
+
+That is ~11 percentage points per decade of training data, so extrapolating to a
+vocabulary frozen on all 4M still leaves **~13% of a fresh structure's labels
+unrepresented**. Production silently drops OOV labels at transform time, so a third
+of every test structure's descriptor is currently being discarded at 200k.
+
+Combined with §11 the diagnosis is coherent: WL labels are near-unique because
+perception makes them conformation-dependent, the vocabulary therefore grows with
+the data instead of saturating, and the frozen-vocabulary assumption the pipeline
+rests on never becomes true. **Capping the depth at 1–2 is the obvious first
+experiment** — depth 1 alone has a 41k-label vocabulary of which 35% survive
+min_count ≥ 2, versus 10% at depth 3.
+
+## 13. There is no single correlation length scale
+
+`figures/f4_variogram.png`, on 20,000 structures with the production WL and
+geometry featurisers reduced to PLS-10.
+
+**No natural cutoff exists.** The pairwise-distance distribution is unimodal in
+both embeddings with no gap — there is no "near vs far" structure for compact
+support to snap to. The pooled correlation range (first lag reaching 95% of the
+sill) is 0.89 in WL against a median pair distance of 0.69, and 4.88 in geometry
+against a median of 4.02: correlation persists out to *beyond the typical pair
+separation*. The compact-support radius is therefore a compute budget, not a
+property of the data — which is what the existing percentile-based cutoff already
+assumes, and this confirms it is the right way to think about it.
+
+**The range is not one number.** Normalised by each subset's own median pair
+distance, the WL range spans 0.40 (biomolecules) to 1.47 (electrolytes) — a 3.7×
+spread — and geometry spans 0.62 to 1.85. A single global length scale is
+misspecified across subsets by roughly a factor of four.
+
+**Nor is the noise floor.** The nugget/sill ratio — the share of a subset's target
+variance the embedding cannot resolve at any distance — varies from ~0 to nearly 1:
+
+| subset | WL nugget/sill | geometry nugget/sill |
+|---|---|---|
+| RGD | **0.95** | 0.00 |
+| ani2x | 0.26 | 0.19 |
+| biomolecules | 0.25 | 0.09 |
+| electrolytes | 0.12 | 0.18 |
+| metal complexes | 0.09 | 0.19 |
+| GEOM (orca6) | 0.00 | 0.00 |
+
+RGD is the extreme case: its target is essentially invisible to the WL embedding
+(nugget ≈ sill) and fully visible to geometry. This is an *a priori*, per-category
+noise floor — exactly the quantity a per-category noise term in the kernel would
+need, available without fitting a GP.
+
+## 14. The block-sparse kernel is discarding real information
+
+`figures/f17_cross_category.png`. The production kernel zeroes every cross-`data_id`
+block. Two measurements say that is not free:
+
+| embedding | 10-NN links that cross a boundary | rows with ≥1 cross neighbour | R² of y from same-category neighbour mean | from cross-category |
+|---|---|---|---|---|
+| WL | **55.3%** | 88.9% | 0.754 | **0.682** |
+| geometry | 40.6% | 77.5% | 0.654 | 0.441 |
+
+In the WL embedding more than half of all nearest-neighbour links cross a category
+boundary, and those neighbours carry **90% as much information about `y`** as
+same-category ones. The neighbour matrix shows where: RGD's neighbours are only 49%
+RGD (14% biomolecules, 16% trans1x), reactivity 43%, ani2x 41%, SPICE 33% — the
+small subsets are largely embedded *inside* the large ones. Metal complexes (88%
+self) and GEOM (76%) are the only genuinely separable categories.
+
+Caveat: these R² values are neighbour-mean predictions computed over the whole 20k
+sample, so both are optimistic in absolute terms; the same/cross *comparison* is the
+meaningful quantity and both arms carry the same bias. Some of the same-category
+advantage is also confounded — `data_id` correlates with composition, and
+composition is 53% of the target.
+
+The practical reading: block sparsity is a **compute** decision, and it is currently
+being paid for with signal. Worth testing a relaxed version (allow the k nearest
+cross-category neighbours, or block only the pairs that are genuinely far) against
+the current all-or-nothing structure.
+
+## 15. Next
+
+The two experiments this pass argues for, both in `wl_gp2scale`, both cheap, both
+with paired per-seed differences at production N:
+
+1. **Sweep `cutoff_mult`** (1.0 / 1.1 / 1.2). It halves same-molecule graph
+   splitting and cuts spurious bonds; it is one constant shared by the WL, geometry
+   and strain channels.
+2. **Cap the WL depth at 1–2.** Depth 3 contributes 65% of the vocabulary and only
+   10% of its labels are ever seen twice.
+
+And two structural questions this pass has now made concrete: whether the
+cross-category blocks should be relaxed (§14), and whether the kernel should carry
+per-category signal variance and noise (§13, §3).

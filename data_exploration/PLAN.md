@@ -1,11 +1,18 @@
 # `data_exploration` — plan
 
-> **Status (2026-07-24): steps 1–3 are done** — the full 4M census, the redundancy
-> and ceiling analysis, and 14 figures. Results in `REPORT.md`, facts in
-> `DATASET_CARD.md`, numbers in `cache/summary.json`. Steps 4–5 (the 3D structural
-> pass and the descriptor diagnostics) are not started.
+> **Status (2026-07-25): steps 1–5 are done.** The full 4M census, the redundancy
+> and ceiling analysis, the two 200k structural samples, the descriptor diagnostics,
+> and 21 figures. Results in `REPORT.md`, facts in `DATASET_CARD.md`, numbers in
+> `cache/summary.json` and `cache/descriptors.json`.
 >
-> One planned figure changed shape once the data came in. **F3 was designed as
+> **Step 4–5 outcome that changed the plan.** §5.2 expected the WL hash to close the
+> molecular-graph ceiling. It cannot: bond perception thresholds distances, so 87% of
+> same-molecule conformer families receive *different* WL hashes and the within-WL
+> variance lands *below* the within-molecule variance — impossible for a graph
+> invariant. The bracket [0.53, 0.92] stands, and the finding that replaced the
+> number is more useful (`REPORT.md` §11, F20).
+>
+> One step-3 figure also changed shape once the data came in. **F3 was designed as
 > "redundancy CCDF + within/between variance"**, on the hypothesis that `train_4M`
 > was full of conformer duplicates. It is not: 3.63M provenance families for 3.99M
 > structures. So F3 became the **description ceiling ladder** (what each level of

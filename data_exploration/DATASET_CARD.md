@@ -66,6 +66,17 @@ One page of facts, all measured on the full split by `data_exploration/census.py
 - Best achievable held-out R² given composition + charge + spin: **0.53**;
   given full molecule identity: **0.92**.
 
+## Structure (Pass B, 200k stratified sample, bonds perceived at 1.2× covalent radii)
+
+- **32% of structures are more than one molecule** — biomolecules 82% (median 2
+  fragments), electrolytes 78% (median 5, max 43), GEOM 0%.
+- Compact throughout: `R_g = 1.08 n^(1/3)`, median R_g 4.0 Å.
+- Bond-length modes: H–C 1.09, H–N 1.01, H–O 0.97, C–C 1.39, C–O 1.43, C–N 1.45,
+  C–S 1.81 Å.
+- Löwdin charges do not track electronegativity: mean +0.09 e on H, −0.19 on C,
+  −0.06 on O, +0.03 on N, +0.71 on S. Median within-structure charge span 0.85 e,
+  bimodal (neutral organics ~0.6 e, ionic systems ~1.4 e).
+
 ## Known caveats
 
 - **`warnings` is not a quality field** — all 3,986,754 structures carry
@@ -78,3 +89,9 @@ One page of facts, all measured on the full split by `data_exploration/census.py
 - 110 structures sit exactly at max|F| = 50 eV/Å, an upstream clipping boundary.
 - Molecule "family" grouping is inferred from `source` naming conventions and is
   a heuristic; parse-free `(formula, charge, spin)` numbers are reported alongside.
+- **Bond perception is not chemistry.** At the 1.2× multiplier every descriptor in
+  this repo uses, 41% of carbon atoms are assigned more than four bonds, the C–C
+  distribution grows a spurious peak at 2.4 Å, N–N's mode is a non-bonded 2.29 Å
+  contact, and 88% of same-molecule conformer families receive different WL graphs.
+  Any "graph" quantity in this repo is partly a geometry fingerprint
+  (`REPORT.md` §11).
