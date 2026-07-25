@@ -3,6 +3,9 @@
 cache/census_parts/
 cache/families.npz
 cache/derived.npz
+cache/geom_*.npz
+cache/emb_*.npz
+cache/strain_*.npz
 
 # The small JSON summaries ARE tracked -- summary.json, families.json and
 # warnings.json are what REPORT.md and the poster quote, so they must be
@@ -10,3 +13,4 @@ cache/derived.npz
 !cache/summary.json
 !cache/families.json
 !cache/warnings.json
+!cache/descriptors.json
