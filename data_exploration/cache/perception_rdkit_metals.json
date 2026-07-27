@@ -1,0 +1,90 @@
+{
+ "n": 1200,
+ "n_families": 466,
+ "methods": {
+  "ase_1.0": {
+   "n_ok": 1200,
+   "n_fail": 0,
+   "fail_rate": 0.0,
+   "ms_per_mol": 1.8261977083360157,
+   "bonds_per_atom": 1.090433604070879,
+   "families_scored": 466,
+   "frac_families_split": 0.6201716738197425,
+   "fail_by_subset": {
+    "metal_complexes": 0.0
+   }
+  },
+  "ase_1.1": {
+   "n_ok": 1200,
+   "n_fail": 0,
+   "fail_rate": 0.0,
+   "ms_per_mol": 1.7725506249795824,
+   "bonds_per_atom": 1.157339528257069,
+   "families_scored": 466,
+   "frac_families_split": 0.8068669527896996,
+   "fail_by_subset": {
+    "metal_complexes": 0.0
+   }
+  },
+  "ase_1.2": {
+   "n_ok": 1200,
+   "n_fail": 0,
+   "fail_rate": 0.0,
+   "ms_per_mol": 1.7713415274920408,
+   "bonds_per_atom": 1.484900539885112,
+   "families_scored": 466,
+   "frac_families_split": 0.944206008583691,
+   "fail_by_subset": {
+    "metal_complexes": 0.0
+   }
+  },
+  "rdkit_ctd": {
+   "n_ok": 1200,
+   "n_fail": 0,
+   "fail_rate": 0.0,
+   "ms_per_mol": 0.8913319091758847,
+   "bonds_per_atom": 1.0776594804818467,
+   "families_scored": 466,
+   "frac_families_split": 0.5300429184549357,
+   "fail_by_subset": {
+    "metal_complexes": 0.0
+   }
+  },
+  "pymatgen_crystalnn": {
+   "n_ok": 1199,
+   "n_fail": 1,
+   "fail_rate": 0.0008333333333333334,
+   "ms_per_mol": 688.3585213541908,
+   "bonds_per_atom": 0.9354202621396355,
+   "families_scored": 465,
+   "frac_families_split": 0.864516129032258,
+   "fail_by_subset": {
+    "metal_complexes": 0.0008333333333333334
+   }
+  },
+  "pymatgen_voronoi": {
+   "n_ok": 1200,
+   "n_fail": 0,
+   "fail_rate": 0.0,
+   "ms_per_mol": 928.4176980208334,
+   "bonds_per_atom": 1.4364388490651618,
+   "families_scored": 466,
+   "frac_families_split": 0.9892703862660944,
+   "fail_by_subset": {
+    "metal_complexes": 0.0
+   }
+  },
+  "pymatgen_econn": {
+   "n_ok": 1200,
+   "n_fail": 0,
+   "fail_rate": 0.0,
+   "ms_per_mol": 38.477037778357044,
+   "bonds_per_atom": 0.772074496564828,
+   "families_scored": 466,
+   "frac_families_split": 0.796137339055794,
+   "fail_by_subset": {
+    "metal_complexes": 0.0
+   }
+  }
+ }
+}

@@ -389,7 +389,8 @@ def _geom_vector_one(atoms, spec):
         blocks["rdf"] = (rdf / max(n, 1)).ravel()
 
     if {"angle", "torsion", "strain"} & set(channels):
-        adj, _ = build_graph(atoms, spec["cutoff_mult"])
+        adj, _ = build_graph(atoms, spec["cutoff_mult"],
+                             spec.get("perceiver", "ase"))
         if "angle" in channels:
             h = _gaussian_hist(bond_angles(adj, P), spec["ang_centers"], spec["sigma_angle"])
             blocks["angle"] = h / max(n, 1)
@@ -486,6 +487,7 @@ class SparseGeometryFeaturizer:
     r_short: float = 3.0
     charge_key: str = "lowdin_charges"
     cutoff_mult: float = 1.2
+    perceiver: str = "ase"          # see wl_features.build_graph
     ref_sample: int = 20_000        # molecules used to learn the strain reference
     strain_min_count: int = 30      # min observations before a key gets its own r0
     # frozen state
@@ -616,7 +618,7 @@ class SparseGeometryFeaturizer:
         for atoms in sample:
             Z = np.asarray(atoms.get_atomic_numbers())
             P = np.asarray(atoms.get_positions(), dtype=float)
-            adj, _ = build_graph(atoms, self.cutoff_mult)
+            adj, _ = build_graph(atoms, self.cutoff_mult, self.perceiver)
             recs.extend(bond_records(adj, P, Z))
             for i, nbrs in enumerate(adj):
                 k = len(nbrs)
@@ -656,6 +658,7 @@ class SparseGeometryFeaturizer:
             "r_short": self.r_short,
             "charge_key": self.charge_key,
             "cutoff_mult": self.cutoff_mult,
+            "perceiver": self.perceiver,
             "strain_ref": self.strain_ref_,   # plain dicts -> picklable, scatters fine
             "width": self.ncols_,
         }

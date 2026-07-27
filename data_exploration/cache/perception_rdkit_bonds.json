@@ -1,0 +1,38 @@
+{
+ "n": 300,
+ "n_families": 125,
+ "methods": {
+  "rdkit_bonds": {
+   "n_ok": 90,
+   "n_fail": 210,
+   "fail_rate": 0.7,
+   "ms_per_mol": 1520.848329999911,
+   "bonds_per_atom": 0.9677369376971208,
+   "families_scored": 43,
+   "frac_families_split": 0.023255813953488372,
+   "fail_by_subset": {
+    "biomolecules": 0.6666666666666666,
+    "elytes": 0.3364485981308411,
+    "metal_complexes": 0.9820359281437125,
+    "orbnet_denali": 0.2,
+    "reactivity": 0.0
+   }
+  },
+  "rdkit_bonds_topology": {
+   "n_ok": 90,
+   "n_fail": 210,
+   "fail_rate": 0.7,
+   "ms_per_mol": 1501.9070541666588,
+   "bonds_per_atom": 0.9677369376971208,
+   "families_scored": 43,
+   "frac_families_split": 0.0,
+   "fail_by_subset": {
+    "biomolecules": 0.6666666666666666,
+    "elytes": 0.3364485981308411,
+    "metal_complexes": 0.9820359281437125,
+    "orbnet_denali": 0.2,
+    "reactivity": 0.0
+   }
+  }
+ }
+}

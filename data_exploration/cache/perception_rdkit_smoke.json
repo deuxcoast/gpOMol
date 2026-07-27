@@ -1,0 +1,42 @@
+{
+ "n": 44,
+ "n_families": 14,
+ "methods": {
+  "ase_1.2": {
+   "n_ok": 44,
+   "n_fail": 0,
+   "fail_rate": 0.0,
+   "ms_per_mol": 4.163764204184355,
+   "bonds_per_atom": 1.4851088677684514,
+   "families_scored": 14,
+   "frac_families_split": 0.9285714285714286,
+   "fail_by_subset": {
+    "metal_complexes": 0.0
+   }
+  },
+  "pymatgen_econn": {
+   "n_ok": 0,
+   "n_fail": 44,
+   "fail_rate": 1.0,
+   "ms_per_mol": 17.588965909619056,
+   "bonds_per_atom": NaN,
+   "families_scored": 0,
+   "frac_families_split": NaN,
+   "fail_by_subset": {
+    "metal_complexes": 1.0
+   }
+  },
+  "pymatgen_crystalnn": {
+   "n_ok": 44,
+   "n_fail": 0,
+   "fail_rate": 0.0,
+   "ms_per_mol": 747.3499630670465,
+   "bonds_per_atom": 0.9208800035490313,
+   "families_scored": 14,
+   "frac_families_split": 1.0,
+   "fail_by_subset": {
+    "metal_complexes": 0.0
+   }
+  }
+ }
+}
