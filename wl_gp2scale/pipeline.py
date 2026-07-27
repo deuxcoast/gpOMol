@@ -43,6 +43,7 @@ class WLGPPipeline:
                               # radius from the variogram/R_inf transfers across N)
     vocab_sample: int = 0  # 0 = fit vocab on ALL train (no OOV); >0 = stratified cap
     cutoff_mult: float = 1.2
+    perceiver: str = "ase"
     # fitted state
     featurizer: SparseWLFeaturizer = field(default=None, repr=False)
     reducer: SparsePLS = field(default=None, repr=False)
@@ -70,7 +71,8 @@ class WLGPPipeline:
             fit_atoms = atoms
             print(f"[pipe] fitting WL vocab on ALL {len(atoms):,} training molecules")
         self.featurizer = SparseWLFeaturizer(
-            depth=self.depth, min_count=self.min_count, cutoff_mult=self.cutoff_mult
+            depth=self.depth, min_count=self.min_count, cutoff_mult=self.cutoff_mult,
+            perceiver=self.perceiver,
         ).fit(fit_atoms)
 
         X_tr = self.featurizer.transform(atoms, client=client, chunk=chunk)
@@ -117,6 +119,7 @@ class GeometryPipeline:
     cutoff_percentile: float = 25.0
     cutoff_abs: float = None
     cutoff_mult: float = 1.2
+    perceiver: str = "ase"
     # fitted state
     featurizer: SparseGeometryFeaturizer = field(default=None, repr=False)
     reducer: SparsePLS = field(default=None, repr=False)
@@ -128,6 +131,7 @@ class GeometryPipeline:
         self.featurizer = SparseGeometryFeaturizer(
             top_k=self.top_k, channels=tuple(self.channels), r_max=self.r_max,
             charge_key=self.charge_key, cutoff_mult=self.cutoff_mult,
+            perceiver=self.perceiver,
         ).fit(atoms)
         X_tr = self.featurizer.transform(atoms, client=client, chunk=chunk)
         self.reducer = SparsePLS(

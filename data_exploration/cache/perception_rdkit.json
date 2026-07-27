@@ -1,0 +1,22 @@
+{
+ "n": 64,
+ "n_families": 27,
+ "methods": {
+  "rdkit_hueckel": {
+   "n_ok": 64,
+   "n_fail": 0,
+   "fail_rate": 0.0,
+   "ms_per_mol": 169.85135090635595,
+   "bonds_per_atom": 1.032448051451266,
+   "families_scored": 27,
+   "frac_families_split": 0.3333333333333333,
+   "fail_by_subset": {
+    "biomolecules": 0.0,
+    "elytes": 0.0,
+    "metal_complexes": 0.0,
+    "orbnet_denali": 0.0,
+    "reactivity": 0.0
+   }
+  }
+ }
+}

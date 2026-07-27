@@ -410,16 +410,433 @@ being paid for with signal. Worth testing a relaxed version (allow the k nearest
 cross-category neighbours, or block only the pairs that are genuinely far) against
 the current all-or-nothing structure.
 
-## 15. Next
+## 15. The `cutoff_mult` sweep — run, and the prescription was half wrong
 
-The two experiments this pass argues for, both in `wl_gp2scale`, both cheap, both
-with paired per-seed differences at production N:
+Experiment 1 of §16 has been run: `dim_sweep --bond-mult {1.0, 1.1, 1.2} --n 20000
+--channels wl`, **6 seeds** (1, 2, 3, 7, 42, 123), all arms on identical frozen
+splits so every comparison is paired. The 1.2 arm reproduces the recorded baseline
+exactly (0.4172 / 0.3425 / 0.2334 on seeds 42/7/123), which confirms the arms differ
+only in the constant under test.
 
-1. **Sweep `cutoff_mult`** (1.0 / 1.1 / 1.2). It halves same-molecule graph
-   splitting and cuts spurious bonds; it is one constant shared by the WL, geometry
-   and strain channels.
+| `cutoff_mult` | GP R² mean | GP R² **std** | OLS R² | raw WL labels | kept (min_count ≥ 2) | test OOV |
+|---|---|---|---|---|---|---|
+| 1.00 | 0.2752 | 0.0455 | 0.2960 | 230k | 37.4k | 10.5% |
+| **1.10** | **0.3618** | **0.0347** | **0.3580** | 287k | 40.0k | 13.1% |
+| 1.20 (default) | 0.3158 | 0.0734 | 0.2998 | 460k | 54.9k | 21.0% |
+
+Paired per-seed differences against the 1.2 default:
+
+| arm | mean Δ | std | t | seeds improved |
+|---|---|---|---|---|
+| 1.00 − 1.20 | **−0.0406** | 0.0483 | −2.06 | 1 / 6 |
+| 1.10 − 1.20 | **+0.0460** | 0.0738 | +1.53 | 5 / 6 |
+
+**The effect is not monotone, so "tighter is more chemical, therefore better" — the
+reasoning in §11 — is wrong.** 1.0 is the *worst* arm (loses on 5 of 6 seeds,
+t = −2.06): pulling the threshold all the way in drops real long bonds (metal–ligand,
+hypervalent main group) along with the spurious contacts. There is an interior
+optimum, and at this N it is near 1.1.
+
+**What 1.1 actually buys is stability, not headroom.** The across-seed std falls
+0.073 → 0.035, and the gain is concentrated exactly where 1.2 fails: the two worst
+1.2 seeds (0.233, 0.238) gain **+0.131 and +0.137**, while the two best barely move
+(+0.003, +0.019). 1.1 does not raise the ceiling; it removes the failure mode. That
+is precisely the mechanism §11 predicted — unstable perception occasionally yields a
+bad vocabulary — even though the direction of the fix was not.
+
+Two supporting observations: OLS on the embedding tracks GP across all three arms
+(0.296 / 0.358 / 0.300), so this is the **descriptor** changing rather than the
+kernel; and 1.1 cuts the raw vocabulary 38% and test OOV from 21% to 13%, which is
+the §12 problem improving at the same time.
+
+**Statistical honesty.** At n = 6 the mean improvement is *not* significant by a
+paired t-test (t = 1.53, p ≈ 0.19) — the per-seed differences are large and
+skewed because the effect lives in the failing seeds. What is solid is the sign
+(5/6), the halved variance, and the vocabulary/OOV reduction. Treat +0.046 as
+suggestive and the stability gain as established; more seeds would settle the mean
+cheaply (~1.5 min/seed at 20k on CPU).
+
+**Recommendation:** switch the default to **1.1** on the stability and vocabulary
+evidence, and re-check at 200k before the full ladder — the optimum may move with N,
+since a larger training set estimates rare labels better and may tolerate the wider
+vocabulary that 1.2 produces.
+
+Reproduce with `python -m data_exploration.bondmult_report cache/bondmult*_wl_*.npz`.
+
+## 16. Would RDKit perceive a better graph? Yes in principle, no in practice — but there is a free win
+
+`perception_rdkit.py`, on 2,001 structures from 871 same-molecule provenance
+families (the §11 sample), scoring each perceiver by the same metric: **what
+fraction of same-molecule families does it assign different graphs to?** A true
+chemical graph would score 0.
+
+| perceiver | what it is | ok | ms/mol | bonds/atom | families split |
+|---|---|---|---|---|---|
+| ASE 1.0 | covalent radii × 1.0 | 2001 | 1.7 | 1.033 | 35.1% |
+| ASE 1.1 | covalent radii × 1.1 | 2001 | 1.7 | 1.082 | 61.7% |
+| **ASE 1.2 (production)** | covalent radii × 1.2 | 2001 | 1.7 | 1.326 | **87.7%** |
+| **`DetermineConnectivity()`** | connect-the-dots | 2001 | **0.7** | 1.024 | **28.4%** |
+| `DetermineConnectivity(useVdw)` | covalent radii × 1.3 | 2001 | 0.6 | 1.039 | 33.9% |
+| `DetermineConnectivity(useHueckel)` | extended Hückel overlap | — | 170 | 1.032 | 33.3%¹ |
+| `DetermineBonds()` | xyz2mol + bond orders | **90/300** | **1521** | 0.968 | **2.3%**² |
+| `DetermineBonds()`, orders ignored | the connectivity underneath it | 90/300 | 1502 | 0.968 | **0.0%**² |
+
+¹ n=64; the process **segfaults** on the full sample (see below).
+² conditioned on the 30% of structures xyz2mol could handle — a favourable subset.
+
+**The hypothesis is right.** A valence-based chemical graph *is* essentially
+conformer-invariant: 0.0% split where xyz2mol succeeds, against 87.7% for the
+production perceiver. The instability §11 identified is real and a chemistry-aware
+perceiver removes it.
+
+**RDKit cannot deliver it on this dataset.** `DetermineBonds` fails on **70%** of
+structures, and the failures are exactly where predicted — **98% of metal
+complexes** (20% of `train_4M`), 67% of biomolecules, 34% of electrolytes, 0% of
+reactivity. xyz2mol assumes organic valences; this dataset is 20% metal complexes and
+17% open-shell. It also costs **1.5 s/molecule** (4M ≈ 70 core-days) and, worse,
+cannot be time-bounded in-process: the search sits inside a C++ call, so a `SIGALRM`
+handler never gets to run. `useHueckel=True` is worse — 170 ms/mol *and* it takes
+the interpreter down with a silent segfault, uncatchable by `try/except`.
+
+**But `DetermineConnectivity()` is a free win.** Connect-the-dots is **2.4× faster
+than ASE** (0.7 vs 1.7 ms/mol), never fails, and cuts the split rate from 87.7% to
+**28.4%** — better than any ASE multiplier including the 1.1 that §15 measured as
+worth +0.046 R². It is a drop-in replacement for `build_graph` on both axes.
+
+**One subtlety worth knowing: the bond orders are slightly *destabilising*.**
+Ignoring them scores 0.0% and keeping them scores 2.3% on the same molecules — so
+xyz2mol occasionally assigns different resonance forms (which C–C is the double bond
+in a conjugated system) to different conformers. The prize is the *connectivity*, not
+the orders.
+
+### 16b. …and on R² it is a disaster. The split-rate proxy was misleading
+
+`build_graph` now takes a `perceiver` argument (`ase` default, `rdkit_ctd`),
+threaded through both featurisers, both pipelines and `dim_sweep --perceiver`, so
+connect-the-dots could be run as a fourth arm of the §15 sweep — same 20k subset,
+same 6 seeds, same frozen splits.
+
+| arm | bonds/atom | families split | GP R² mean | GP R² std | OLS R² |
+|---|---|---|---|---|---|
+| ASE 1.0 | 1.03 | 35.1% | 0.2752 | 0.0455 | 0.2960 |
+| **ASE 1.1** | 1.08 | 61.7% | **0.3618** | 0.0347 | 0.3580 |
+| ASE 1.2 (production) | 1.33 | 87.7% | 0.3158 | 0.0734 | 0.2998 |
+| **`rdkit_ctd`** | 0.97 | **28.4%** | **0.0211** | 0.1144 | 0.0540 |
+
+Paired against the production default: `rdkit_ctd` **−0.2946 ± 0.167, t = −4.31,
+losing on 6 of 6 seeds**. It is by far the worst arm — one seed goes outright
+negative (−0.210).
+
+**The proxy inverted the ranking.** Ordered by split rate, `rdkit_ctd` (28.4%) looked
+best and ASE 1.2 (87.7%) worst; ordered by R², that is exactly reversed. The caution
+at the end of §15 was warranted, and stronger than expected.
+
+**It is not an outlier artefact.** The first thing that looked like an explanation —
+at n=2000 a single trans1x reaction structure landed outside the training embedding
+box and dragged OLS to −1.09 — does not survive at 20k: only **0.1% of test rows**
+fall outside the training box under `rdkit_ctd`, the same as ASE, and no row exceeds
+3× any training column. The embedding is not unstable; it simply carries less
+information about the energy.
+
+**The coherent explanation, now supported three independent ways.** The WL channel's
+predictive power on this dataset comes substantially from the *geometry that leaks in
+through threshold-based perception*. Purify the graph toward chemistry and the
+descriptor gets worse:
+
+* §11 — the perceived graph is a geometry fingerprint (87% of conformer families split);
+* §15 — ASE 1.0, the most chemically pure threshold, is worse than 1.2;
+* §16b — `rdkit_ctd`, valence-aware and the most chemically principled connectivity
+  of the four, is worst of all.
+
+RDKit's pruning removes precisely the weak/long contacts that a valence check calls
+spurious, and on a dataset whose median max|F| is 3.4 eV/Å those contacts are
+carrying real energetic information. Note it is not a simple edge-count effect
+either: `rdkit_ctd` (0.97 bonds/atom) is far worse than ASE 1.0 (1.03), and 1.1
+(1.08) beats 1.2 (1.33). *Which* edges, not how many.
+
+**Verdict: do not adopt RDKit for the WL channel.** The chemically-correct graph is
+the right object for cheminformatics and the wrong object for this regression. If
+conformer-stable graph identity is wanted, the way to get it is to keep the loose
+perception *and* let the geometry channels carry the 3D information explicitly —
+which is what `geom` and `strain` already do — not to purify the graph and hope it
+still encodes geometry implicitly.
+
+The plumbing stays in (`perceiver="ase"` is the default, so nothing changes unless
+asked) because it is what makes this question answerable, and re-answerable at 200k.
+
+### 16c. The redundancy hypothesis — right, and it was the bond ORDERS all along
+
+§16b judged each perceiver on its **standalone** R². That is the wrong test for an
+*additive* kernel, where what matters is a channel's **marginal** contribution given
+geometry. The hypothesis: ASE-WL scores well alone because it leaks geometry, but
+geometry is already carried better by the `geom` channel, so a purer bond graph could
+score worse alone and still contribute *more* on top. `orthogonality.py` and
+`orthogonality_organic.py` test it.
+
+**Two corrections to §16 and §16b came out of this.**
+
+*First, a methodological confound.* Under the production reducer the RDKit arm has a
+**negative** solo R² — an uninformative-but-neutral feature set would give 0, not
+negative. `SparsePLS` is *supervised*: it picks directions maximising covariance with
+y on train, so on weak features it fits directions that do not replicate. Repeating
+everything with an unsupervised truncated SVD removes that confound, and the
+catastrophic §16b verdict softens: over the whole 20k the two perceivers become
+indistinguishable (paired increment difference **−0.0002 ± 0.0038**). So "RDKit is a
+disaster" was substantially "RDKit **+ supervised PLS** is a disaster".
+
+*Second, a mislabelled object.* §16 credited the 0.0% conformer-split figure to
+xyz2mol's valence reasoning. It does not: `DetermineBonds` *is*
+`DetermineConnectivity` plus order assignment, so discarding the orders reproduces
+connect-the-dots exactly — the arms came out byte-identical. That 0.0% is
+connect-the-dots restricted to the molecules xyz2mol can solve, i.e. it measures the
+easy organic subset, not bond-order chemistry. To test the orders they have to be
+*kept*, and since WL labels nodes rather than edges, they are folded into each atom's
+label as the sorted multiset of its incident bond orders (`6#1,1,2` = sp² carbon).
+
+**The definitive test** therefore runs on the organic subsets, where `DetermineBonds`
+is 91% successful and **1.7 ms/mol** (the 1.5 s/mol average was entirely metal
+complexes grinding in the combinatorial search), keeping only molecules every
+perceiver handles so all arms see identical rows — 6.3k molecules, 3 seeds,
+unsupervised reducer, ridge, held-out:
+
+| perceiver | solo R² | **increment over geom** | on geom-residual | redundancy | mean CC |
+|---|---|---|---|---|---|
+| ASE 1.2 | +0.1065 | **+0.0024** | +0.0065 | 26.7% | 0.421 |
+| `rdkit_ctd` (connectivity) | +0.1221 | **+0.0046** | +0.0048 | 28.6% | 0.429 |
+| **`rdkit_bonds` (+ orders)** | +0.1424 | **+0.0253** | +0.0376 | **24.4%** | **0.397** |
+
+Paired per-seed against ASE: `rdkit_bonds` **+0.0228 ± 0.0067**, positive on all
+three seeds (+0.0212, +0.0171, +0.0302). `rdkit_ctd` is +0.0022 ± 0.0046 — a wash.
+
+**The hypothesis holds, and it localises the signal.** Given a geometry channel, the
+accurate bond graph contributes **~10× more than the ASE graph** (+0.025 vs +0.002),
+and it is simultaneously the *least* redundant with geometry on both measures
+(24.4% of its columns linearly predictable from `geom`, mean canonical correlation
+0.397 — the lowest of the three). Exactly the predicted signature: weaker alone,
+more orthogonal, worth more in combination.
+
+**But the value is in the bond orders, not the connectivity.** `rdkit_ctd` — accurate
+connectivity, no orders — contributes no more than ASE (+0.0046 vs +0.0024, inside
+noise). Only the arm carrying single/double/triple/aromatic distinctions moves.
+That is chemistry a distance threshold cannot express at any multiplier, which is why
+it survives conditioning on geometry.
+
+**Caveats, and they are load-bearing.** (i) This is the **organic third** of
+`train_4M` — precisely the part xyz2mol can solve; the 20% that is metal complexes
+fails 98% of the time and cannot be tested this way at all. (ii) The absolute
+increment is small: +0.025 on a 0.61 baseline. (iii) It is measured linearly on
+embeddings, not through the GP.
+
+**What this suggests building** is not a perceiver swap but a *hybrid*: keep ASE
+perception for the graph everywhere, and add a **bond-order channel** wherever
+xyz2mol succeeds, with a per-structure fallback for the rest. The failure rate makes
+that a routing problem rather than a replacement, and §14's finding that the kernel
+already wastes signal on rigid category blocks suggests the routing is worth the
+complexity only if the +0.025 survives at production N and through the GP.
+
+### 16d. Through the actual GP: direction confirmed, but neither WL variant earns its block
+
+§16c was linear-on-embeddings. Run as a real additive gp2Scale channel instead —
+organic subsets only, rows every perceiver handles (6,251 of 20,000), `geom` held on
+ASE in **both** arms so only the WL channel changes, per-channel signal variances
+**trained** by marginal likelihood (frozen `var(y)/n_channels` dilutes a weak channel
+by construction and would have measured that instead), 3 seeds:
+
+| WL perceiver | wl alone | geom | additive | **additive − geom** |
+|---|---|---|---|---|
+| ASE 1.2 | 0.3519 | 0.5939 | 0.5253 | **−0.0686** |
+| `rdkit_bonds` | **0.4050** | 0.5939 | 0.5701 | **−0.0238** |
+
+Paired per-seed, `rdkit_bonds` − ASE: **+0.0448 ± 0.0688** on the increment
+(2/3 seeds, t = 1.13), **+0.0531 ± 0.0829** standalone (2/3 seeds). `geom` is
+byte-identical across arms (0.5834 / 0.6162 / 0.5821, same cutoffs), confirming the
+pairing.
+
+**Three things this settles and one it does not.**
+
+*The direction holds under the GP.* The bond-order channel beats the ASE graph both
+standalone (+0.053) and in combination (+0.045), and on seed 123 it produces the only
+configuration in this whole experiment where adding a WL channel to geometry actually
+*helps* (0.6193 vs 0.5821). §16c's linear estimate (+0.023 SVD, +0.045 PLS) and this
+GP estimate (+0.045) agree in sign and magnitude.
+
+*On organics the bond graph is the better WL descriptor, full stop.* Standalone
+0.4050 vs 0.3519. This is the exact opposite of the whole-dataset §16b result, and
+the reason is now clear: `rdkit_ctd` was being run over metal complexes and clusters
+it has no business perceiving, whereas here it runs only where xyz2mol succeeds.
+
+*But neither variant earns a kernel block.* Both increments are **negative**:
+geometry alone (0.5939) beats geometry + ASE-WL (0.5253) and geometry + bond-order WL
+(0.5701). On the organic third of `train_4M`, the best model tested is the geometry
+channel by itself. The bond-order channel is *less bad*, not good.
+
+*What n = 3 does not settle* is the +0.045 itself (t = 1.13, one seed negative). The
+seed spread is large because the arms differ most exactly where the ASE graph fails.
+
+**The indicated next step is placement, not more seeds.** The project's own
+channel-placement criterion says a channel earns a Gram block only to the extent its
+effect is *non-additive*, and that the prior mean is the default home — it costs no
+block, adds no neighbours, cannot worsen conditioning, and reaches every test point.
+A channel whose kernel increment is negative but whose information is real is exactly
+the case that criterion was written for. `--mean-channels` already supports it:
+putting the bond-order channel in the **mean only** is the experiment that should
+follow, and it is cheap.
+
+### 16e. Prior mean instead of kernel: it is not a placement problem
+
+The channel-placement criterion says the prior mean is the default home for a
+channel, and the kernel must earn its block. §16d's negative kernel increment made
+that the obvious next test. Same organic subset, same 6,251 rows, same 3 seeds,
+`geom` on ASE throughout, `--train`:
+
+| placement of the WL channel | ASE | vs geom | `rdkit_bonds` | vs geom |
+|---|---|---|---|---|
+| **C: not present** (geom only) | 0.5939 | — | 0.5939 | — |
+| **B: prior mean only** | 0.5177 | **−0.0762** | 0.5684 | **−0.0255** |
+| **A: kernel block + mean** | 0.5253 | −0.0686 | 0.5701 | −0.0238 |
+
+**Moving it to the mean does not rescue it.** Both variants still land below geometry
+alone, and by almost exactly the same margin as when they had a kernel block. The WL
+channel is not mis-placed on this subset — its information is *actively harmful*
+alongside geometry, wherever it is put. That is a clean negative and it closes the
+line of inquiry: no arrangement of these two channels beats the geometry channel by
+itself on organics.
+
+Two things the split does establish, though:
+
+*The kernel block is worthless for the bond-order channel, and nearly so for ASE.*
+A − B, i.e. what the Gram block buys over the same channel in the mean alone:
+`rdkit_bonds` **+0.0017 ± 0.0031**, ASE **+0.0077 ± 0.0020**. The bond-order
+channel's effect is entirely additive-and-global — exactly the strain-like signature
+the placement criterion predicts for a chemistry term. So *if* it is ever used, it
+belongs in the mean, and the block is pure cost.
+
+*The `rdkit_bonds` advantage over ASE is stable across placements.* +0.0508 ± 0.0670
+in the mean, +0.0448 ± 0.0688 in the kernel, 2/3 seeds both times. The effect is a
+property of the descriptor, not of where it is wired in.
+
+**Where this leaves the hypothesis.** The orthogonality reasoning was right and
+survived four independent tests — redundancy measures, linear increments, GP kernel,
+GP prior mean — all agreeing that the accurate bond graph carries something the ASE
+graph does not (~+0.05). What it does *not* survive is the comparison that matters
+for shipping: on the organic third of `train_4M`, **the geometry channel alone beats
+every WL configuration tested**, by 0.02–0.08. The bond-order channel is the best WL
+variant available and still is not worth its place.
+
+The honest reading is that this is a statement about *the organic subset*, where
+geometry is unusually dominant (`geom` alone reaches 0.594 there vs ~0.49 dataset-wide).
+The subsets where WL might still pay are the ones xyz2mol cannot perceive — metal
+complexes above all — which is precisely where this experiment cannot go.
+
+## 17a. WL depth: depth 1 is a 7× scaling win for free
+
+§12 showed the WL vocabulary is overwhelmingly depth-3 (65% of all labels, only 10%
+of them ever seen twice) and that this is what drives the 35% OOV rate. Depth is the
+second lever on that pathology, after `cutoff_mult` (§15). `dim_sweep --depth`
+already existed, so this is a run, not a change: 20k dataset-wide, `--channels wl`,
+**6 seeds**, paired splits.
+
+| depth | kept columns | test OOV | GP R² mean | GP R² std | paired vs depth 3 |
+|---|---|---|---|---|---|
+| **1** | **7,647** | **2.6%** | 0.3085 | **0.0598** | **−0.0073 ± 0.0337** (t = −0.53) |
+| 2 | 28,186 | 11.1% | 0.2999 | 0.0931 | −0.0159 ± 0.0261 (t = −1.49) |
+| 3 (production) | 54,850 | 21.0% | 0.3158 | 0.0734 | — |
+
+*Correctness check*: the depth-3 arm reproduces the §15 `ase 1.2` arm **exactly**
+(mean 0.3158; per-seed 0.269 / 0.238 / 0.395 / 0.343 / 0.417 / 0.233) — same
+configuration, so the harness and the pairing are verified.
+
+**Depth 1 costs nothing measurable and saves almost everything.** Its R² is
+indistinguishable from depth 3 (−0.007, t = −0.53, 3/6 seeds positive) while using
+**7.2× fewer columns** and cutting the out-of-vocabulary rate **8×**, from 21.0% to
+2.6%. It also has the *lowest* across-seed spread of the three (0.0598 vs 0.0734).
+By the decision rule set for this experiment — parity on R², material savings on
+columns and OOV — depth 1 wins outright.
+
+Depth 2 is the worst of the three on both axes, which is worth noting because it
+rules out a simple "shallower is better" reading: the ordering is 1 ≈ 3 > 2, not
+monotone. As with `cutoff_mult` (§15), the relationship between graph resolution and
+predictive power on this dataset is not monotone in the obvious direction.
+
+**Why this matters most at 4M.** A depth-1 label is `(element, sorted multiset of
+neighbour elements)` — a space bounded by chemistry, not by dataset size. The
+measured growth bears that out: depth-1 kept columns go 7,650 → 14,481 as the fitting
+set grows 16k → 60k, an exponent of ≈0.49, against the ≈0.91 of the pooled vocabulary
+(§12). Depth 3 is what makes the vocabulary scale nearly linearly with N and
+extrapolate to ~7.8M columns at 4M; depth 1 largely removes that problem.
+
+**Recommendation:** switch the default to `depth=1` for the 4M ladder on the cost and
+stability evidence, and re-check R² parity at 200k before committing — the same
+caveat as §15, since a larger training set estimates rare deep labels better and
+could tilt the balance back toward depth 3.
+
+## 17b. Metal complexes: no available library gives a stable graph
+
+§16 could not test metal complexes at all — `DetermineBonds` fails on 98% of them —
+and I claimed at the time that nothing existed for the job. That was wrong. Several
+tools do exist, so they were screened on the metric used throughout: the fraction of
+same-molecule provenance families a perceiver assigns *different* graphs to. 1,200
+`metal_complexes` structures from 466 multi-member families:
+
+| perceiver | ok | ms/mol | bonds/atom | **families split** |
+|---|---|---|---|---|
+| ASE 1.0 | 1200 | 1.8 | 1.090 | 62.0% |
+| ASE 1.1 | 1200 | 1.8 | 1.157 | 80.7% |
+| **ASE 1.2 (production)** | 1200 | 1.8 | 1.485 | **94.4%** |
+| **`rdkit_ctd`** | 1200 | **0.9** | 1.078 | **53.0%** |
+| `pymatgen` CrystalNN | 1199 | 688 | 0.935 | 86.5% |
+| `pymatgen` VoronoiNN (tol 0.5) | 1200 | 928 | 1.436 | 98.9% |
+| `pymatgen` EconNN | 1200 | 38 | 0.772 | 79.6% |
+
+**None of the materials-science algorithms help.** CrystalNN — the top scorer in the
+MaterialsCoord benchmark, and the one with the strongest prior claim here since metal
+coordination is its home ground — splits 86.5% of same-molecule families at 688
+ms/mol. VoronoiNN is worse than doing nothing (98.9%). The best perceiver for metals
+is the same connect-the-dots that won the pooled comparison, at 53.0%, and it is also
+by far the cheapest (0.9 ms/mol, 765× faster than CrystalNN).
+
+*Internal control*: a perceiver can trivially lower its split rate by finding fewer
+bonds, so bonds/atom is reported alongside. `rdkit_ctd` wins while finding **more**
+bonds than CrystalNN (1.078 vs 0.935) and than EconNN (0.772), so its advantage is
+real rather than an artefact of under-bonding.
+
+**Two things this settles.**
+
+*Production perception is at its worst exactly where it is hardest.* ASE at 1.2
+splits 94.4% of metal families, against 87.7% pooled — and for metals the ordering
+reverses, with the *tightest* multiplier best (1.0 → 62.0%). Metal–ligand distances
+are long, so a 1.2× covalent multiplier over-connects the coordination sphere badly.
+This is in tension with §15, where 1.1 was the best *R²* arm dataset-wide; the two
+metrics disagree, and R² is the one that decides production.
+
+*A conformer-stable metal graph is not obtainable off the shelf.* The best available
+option still assigns different graphs to half of all same-molecule pairs. That is
+consistent with the literature: the `xyz2mol_tm` paper reports only **>70% agreement**
+between three independent ways of assigning TMC connectivity on tmQMg. Metal
+connectivity is an open problem, not a library call.
+
+**Correcting the record on what exists.** For anyone revisiting this:
+[`xyz2mol_tm`](https://github.com/jensengroup/xyz2mol_tm) (xyz2mol extended to TMCs
+via extended Hückel, *J. Cheminform.* 2025),
+[`molSimplify`](https://github.com/hjkgrp/molSimplify) (TMC graphs plus ML models for
+coordinating atoms), `pymatgen.analysis.local_env` (screened above), and `xtb --wbo`
+(GFN2 Wiberg bond orders, Z ≤ 86). Two practical notes: our shards store
+`nbo_charges` but **not** Wiberg/NBO bond orders, so the electronic route the
+`xyz2mol_tm` paper uses as ground truth would have to be recomputed rather than read;
+and in pymatgen 2026.5.4 `EconNN` advertises `molecules_allowed = True` but its
+`get_nn_info` still calls `_get_image`, which needs `frac_coords` a molecule
+neighbour does not have — all three algorithms have to be run through a padded
+periodic box.
+
+**Line closed.** No GP work follows from this: nothing beats the perceiver we already
+have, and the one that is best is already available and already screened (§16b) as
+harmful to R² dataset-wide.
+
+## 17. Next
+
+1. ~~Sweep `cutoff_mult`~~ — done, §15.
 2. **Cap the WL depth at 1–2.** Depth 3 contributes 65% of the vocabulary and only
-   10% of its labels are ever seen twice.
+   10% of its labels are ever seen twice. Untested.
 
 And two structural questions this pass has now made concrete: whether the
 cross-category blocks should be relaxed (§14), and whether the kernel should carry
