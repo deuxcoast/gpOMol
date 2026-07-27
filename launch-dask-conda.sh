@@ -38,9 +38,15 @@ scheduler_file=$SCRATCH/scheduler_file_gpOmol.json
 # run's `rm -f` deletes the live scheduler file, its scheduler fights the first for
 # the port, and its srun blocks forever because the first srun already holds every
 # task in the allocation.
-if pgrep -u "$USER" -f "dask scheduler" > /dev/null 2>&1; then
-    echo "ERROR: a 'dask scheduler' is already running for $USER" >&2
-    echo "       pids: $(pgrep -u "$USER" -f 'dask scheduler' | tr '\n' ' ')" >&2
+# Also catches a PREVIOUS instance of this script still waiting or still holding an
+# srun: its scheduler may already be dead (so looking only for 'dask scheduler'
+# misses it) while it is still able to hijack this run's scheduler file.
+if pgrep -u "$USER" -f "dask scheduler" > /dev/null 2>&1 \
+   || pgrep -u "$USER" -f "srun.*dask worker" > /dev/null 2>&1 \
+   || [ "$(pgrep -u "$USER" -f "$(basename "$0")" 2>/dev/null | wc -l)" -gt 1 ]; then
+    echo "ERROR: a dask scheduler, a dask srun, or another copy of this script is" >&2
+    echo "       already running for $USER" >&2
+    echo "       pids: $(pgrep -u "$USER" -f 'dask scheduler|srun.*dask worker' | tr '\n' ' ')" >&2
     echo "       Refusing to start a second cluster. To reset:" >&2
     echo "         pkill -u $USER -f 'dask scheduler'; pkill -u $USER -f 'dask worker'" >&2
     echo "         pkill -u $USER -f 'srun.*dask'; rm -f $scheduler_file" >&2
@@ -106,10 +112,33 @@ rm -f "$scheduler_file"
 
 echo "starting scheduler -> $scheduler_file"
 dask scheduler --interface "$DASK_INTERFACE" --scheduler-file "$scheduler_file" &
+sched_pid=$!
 
-sleep 5
-until [ -f "$scheduler_file" ]; do sleep 5; done
-echo "scheduler up; starting $number_of_workers workers"
+# BOUNDED wait, and check the scheduler is still alive while waiting.
+#
+# This used to be `until [ -f "$scheduler_file" ]; do sleep 5; done`, which is a trap
+# with a genuinely baffling symptom: if the scheduler dies during startup (a bad
+# --interface, a port clash) the file never appears, so the script spins here
+# forever instead of exiting. It then HIJACKS the next launch -- as soon as that run
+# writes the scheduler file, this stale loop satisfies and fires its OWN srun, so two
+# sruns fight over the same tasks and both die with
+# "tasks N-M: Exited with exit code 1" / "Force Terminated". The top-of-script guard
+# does not catch it either, because by then this instance's scheduler is dead.
+for _ in $(seq 120); do
+    [ -f "$scheduler_file" ] && break
+    if ! kill -0 "$sched_pid" 2>/dev/null; then
+        echo "ERROR: the scheduler exited during startup (see its traceback above)." >&2
+        echo "       Nothing to clean up; fix the cause and re-run." >&2
+        exit 1
+    fi
+    sleep 1
+done
+if [ ! -f "$scheduler_file" ]; then
+    echo "ERROR: no scheduler file after 120s; killing the scheduler." >&2
+    kill "$sched_pid" 2>/dev/null
+    exit 1
+fi
+echo "scheduler up (pid $sched_pid); starting $number_of_workers workers"
 
 # Foreground on purpose: this srun is what keeps the workers alive. Worker stdout
 # goes to dask_worker_info.txt. srun inherits PATH (and the salloc GPU binding, so
