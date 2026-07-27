@@ -85,10 +85,27 @@ export DASK_DISTRIBUTED__COMM__TIMEOUTS__TCP=3600s
 export DASK_DISTRIBUTED__SCHEDULER__WORK_STEALING=False
 export DASK_DISTRIBUTED__SCHEDULER__WORKER_SATURATION=1
 
+# NETWORK INTERFACE. hsn0 is Perlmutter's HPE Slingshot and does not exist on every
+# cluster -- on Lawrencium the high-speed fabric is InfiniBand (ib0), and dask fails
+# with "'hsn0' is not a valid network interface". Detect instead of hardcoding, in
+# descending order of speed, and let DASK_INTERFACE override.
+if [ -z "${DASK_INTERFACE:-}" ]; then
+    for _if in hsn0 ib0 eth0; do
+        if [ -e "/sys/class/net/$_if" ]; then DASK_INTERFACE=$_if; break; fi
+    done
+fi
+if [ -z "${DASK_INTERFACE:-}" ]; then
+    echo "ERROR: no usable network interface found. Available:" >&2
+    ls /sys/class/net >&2
+    echo "       set DASK_INTERFACE=<name> and re-run." >&2
+    exit 1
+fi
+echo "interface  : $DASK_INTERFACE  (available: $(ls /sys/class/net | tr '\n' ' '))"
+
 rm -f "$scheduler_file"
 
 echo "starting scheduler -> $scheduler_file"
-dask scheduler --interface hsn0 --scheduler-file "$scheduler_file" &
+dask scheduler --interface "$DASK_INTERFACE" --scheduler-file "$scheduler_file" &
 
 sleep 5
 until [ -f "$scheduler_file" ]; do sleep 5; done
@@ -100,6 +117,6 @@ echo "scheduler up; starting $number_of_workers workers"
 srun -n "$number_of_workers" -o dask_worker_info.txt dask worker \
     --memory-limit="30 GiB" \
     --scheduler-file "$scheduler_file" \
-    --interface hsn0 \
+    --interface "$DASK_INTERFACE" \
     --nworkers 1 \
     --nthreads 1
