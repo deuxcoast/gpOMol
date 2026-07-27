@@ -562,10 +562,16 @@ class SparseGeometryFeaturizer:
             kept = [p for p in pairs if pair_df[p] >= need]
             from ase.data import chemical_symbols as _S
             dropped = [p for p in pairs if p not in set(kept)]
+            # Built outside the f-string on purpose. Nesting a comprehension that
+            # reuses the enclosing quote characters needs PEP 701 (python >= 3.12);
+            # the cluster env is 3.11, where it is a SyntaxError at import time.
+            def _sym(z):
+                return _S[z] if z else "OTH"
+
+            examples = [f"{_sym(a)}-{_sym(b)}" for a, b in dropped[:6]]
             print(f"[geom-fit] rdf-pair prune: {len(pairs)} -> {len(kept)} pairs "
                   f"(min_frac={self.pair_min_frac:g} -> >= {need} of "
-                  f"{len(atoms_sample)} mols); dropped e.g. "
-                  f"{[f'{_S[a] if a else 'OTH'}-{_S[b] if b else 'OTH'}' for a, b in dropped[:6]]}")
+                  f"{len(atoms_sample)} mols); dropped e.g. {examples}")
             pairs = kept if kept else pairs
         self.pairs_ = pairs
         if "strain" in self.channels:
