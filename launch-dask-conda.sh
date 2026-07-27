@@ -38,14 +38,28 @@ scheduler_file=$SCRATCH/scheduler_file_gpOmol.json
 # run's `rm -f` deletes the live scheduler file, its scheduler fights the first for
 # the port, and its srun blocks forever because the first srun already holds every
 # task in the allocation.
-# Also catches a PREVIOUS instance of this script still waiting or still holding an
-# srun: its scheduler may already be dead (so looking only for 'dask scheduler'
-# misses it) while it is still able to hijack this run's scheduler file.
+# A PREVIOUS instance of this script can still be waiting or still holding an srun
+# even when its scheduler is dead, so 'dask scheduler' alone is not enough to detect
+# it. Use a PID LOCKFILE rather than pgrep on our own name: `$(pgrep ...)` forks a
+# subshell that inherits this script's command line, so a name match counts itself
+# and the guard fires on every run.
+lockfile="${scheduler_file%.json}.lock"
+if [ -f "$lockfile" ]; then
+    _prev=$(cat "$lockfile" 2>/dev/null || true)
+    if [ -n "${_prev:-}" ] && kill -0 "$_prev" 2>/dev/null; then
+        echo "ERROR: another launch-dask-conda.sh is already running (pid $_prev)" >&2
+        echo "       Refusing to start a second cluster. To reset:" >&2
+        echo "         kill $_prev; rm -f $lockfile" >&2
+        echo "         pkill -u $USER -f 'dask scheduler'; pkill -u $USER -f 'dask worker'" >&2
+        echo "         pkill -u $USER -f 'srun.*dask'; rm -f $scheduler_file" >&2
+        exit 1
+    fi
+    rm -f "$lockfile"          # stale: the writer is gone
+fi
+
 if pgrep -u "$USER" -f "dask scheduler" > /dev/null 2>&1 \
-   || pgrep -u "$USER" -f "srun.*dask worker" > /dev/null 2>&1 \
-   || [ "$(pgrep -u "$USER" -f "$(basename "$0")" 2>/dev/null | wc -l)" -gt 1 ]; then
-    echo "ERROR: a dask scheduler, a dask srun, or another copy of this script is" >&2
-    echo "       already running for $USER" >&2
+   || pgrep -u "$USER" -f "srun.*dask worker" > /dev/null 2>&1; then
+    echo "ERROR: a dask scheduler or a dask srun is already running for $USER" >&2
     echo "       pids: $(pgrep -u "$USER" -f 'dask scheduler|srun.*dask worker' | tr '\n' ' ')" >&2
     echo "       Refusing to start a second cluster. To reset:" >&2
     echo "         pkill -u $USER -f 'dask scheduler'; pkill -u $USER -f 'dask worker'" >&2
@@ -60,6 +74,11 @@ fi
 # Deliberately NO `module load python/...` here: it would prepend its own python and
 # shadow the env, which is the trap in launch-dask-moduleGPU.sh.
 export PATH="$ENV_BIN:$PATH"
+
+# Claim the lock now that the guards have passed, and release it on ANY exit so a
+# crashed run never blocks the next one.
+echo $$ > "$lockfile"
+trap 'rm -f "$lockfile"' EXIT
 
 # The repo is not pip-installed, so `wl_gp2scale` is only importable via the CWD --
 # and that does NOT reach the cluster. `dask scheduler`/`dask worker` are installed
