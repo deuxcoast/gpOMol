@@ -60,6 +60,10 @@ if [[ -z "${SCRATCH:-}" ]]; then
     echo "NOTE: SCRATCH was unset; using $SCRATCH (export it in ~/.bashrc to persist)." >&2
 fi
 
+# es_debug caps well below es_normal, and salloc rejects the whole request if --time
+# exceeds the QoS limit, so this has to be settable rather than hardcoded.
+walltime=${LRC_TIME:-04:00:00}
+
 set -x
 salloc --nodes "$nodes" -n "$tasks" \
        --ntasks-per-node="$gpus_per_node" \
@@ -67,4 +71,4 @@ salloc --nodes "$nodes" -n "$tasks" \
        --partition "$LRC_PARTITION" \
        --qos "$LRC_QOS" \
        --account "$LRC_ACCOUNT" \
-       --time 04:00:00
+       --time "$walltime"
