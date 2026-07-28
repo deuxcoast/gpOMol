@@ -402,7 +402,7 @@ def _write_checkpoint(meta):
 # ------------------------------------------------------------------------- driver
 
 
-def train_radii(chan, y_tr, cat_tr, client, cfg, names=None):
+def train_radii(chan, y_tr, cat_tr, client, cfg, names=None, size_tr=None):
     """Run the block-MCMC over [signal variances, radii]. Returns a TrainResult."""
     names = list(names or (chan.keys() if isinstance(chan, dict) else range(len(chan))))
     C = len(names)
@@ -417,8 +417,11 @@ def train_radii(chan, y_tr, cat_tr, client, cfg, names=None):
     Ztr = np.hstack(Ztr_list)
 
     # the GP models the residual after the linear prior mean, exactly as dim_sweep does
-    mean = LinearEmbeddingMean().fit(Ztr, y_tr)
-    y_resid = y_tr - mean.predict(Ztr)
+    # -- including the size interaction, which is worth ~4x the kernel (PRIOR_MEAN.md).
+    # Radii are trained against whatever residual the production mean leaves, so a
+    # mismatch here would tune the kernel for a target it will never actually see.
+    mean = LinearEmbeddingMean().fit(Ztr, y_tr, size=size_tr)
+    y_resid = y_tr - mean.predict(Ztr, size=size_tr)
 
     bounds, bmeta = radius_bounds(chan, y_resid, cat_tr, cfg, names=names)
     Xtr = with_category_tag(Ztr, cat_tr)
@@ -614,7 +617,9 @@ def main():
         geom_top_k=cfg.geom_top_k, target_neighbors=cfg.seed_neighbors,
         diag_sample=cfg.diag_sample,
     )
-    res = train_radii(chan, ds.y[tr], ds.data_id[tr], client, cfg, names=names)
+    size_tr = np.array([len(ds.atoms[i]) for i in tr], dtype=float)
+    res = train_radii(chan, ds.y[tr], ds.data_id[tr], client, cfg,
+                      names=names, size_tr=size_tr)
     report(res, names, cfg, chan=chan, cat_tr=ds.data_id[tr])
     if cfg.out:
         np.savez(cfg.out, hps_map=res.hps_map, hps_median=res.hps_median,
