@@ -20,6 +20,26 @@ import numpy as np
 from scipy.spatial.distance import cdist, pdist
 
 
+def diag_block_gb(sample: int, n: int) -> float:
+    """Driver-side RAM, in GB, for one dense ``(sample, n)`` float64 distance block.
+
+    Every diagnostic in this module materialises such a block ON THE DRIVER -- the
+    dask workers are not involved. ``sample`` is fixed while ``n`` grows with the run,
+    so a cost that is invisible at 20k (5000 x 16k = 0.64 GB) becomes the largest
+    single allocation in the job at 200k (5000 x 196k = 7.8 GB, and
+    ``cutoff_for_neighbors`` needs a second buffer on top). Lower ``sample`` at scale.
+    """
+    return sample * n * 8 / 1e9
+
+
+def _warn_block_memory(sample: int, n: int, what: str, budget_gb: float = 4.0) -> None:
+    gb = diag_block_gb(sample, n)
+    if gb > budget_gb:
+        print(f"[cutoff] WARNING: {what} needs a {gb:.1f} GB dense block on the DRIVER "
+              f"(sample={sample:,} x n={n:,}). Lower --diag-sample, or run the driver "
+              f"somewhere with the RAM; this is a driver allocation, not a worker one.")
+
+
 def suggest_percentile(n, target_neighbors=50, frac_same_category=1.0):
     """Percentile to ASK FOR so each point keeps ~target_neighbors in-support peers.
 
@@ -59,10 +79,16 @@ def cutoff_for_neighbors(Z_tr, Z_te, target_neighbors=60, dim=None,
         Z_tr, Z_te = Z_tr[:, :dim], Z_te[:, :dim]
     rng = np.random.default_rng(seed)
     ti = rng.choice(len(Z_te), size=min(sample, len(Z_te)), replace=False)
+    _warn_block_memory(len(ti), len(Z_tr), "cutoff_for_neighbors")
     D = cdist(Z_te[ti], Z_tr)
     if data_id_tr is not None and data_id_te is not None:
         same = np.asarray(data_id_te)[ti][:, None] == np.asarray(data_id_tr)[None, :]
-        D = np.where(same, D, np.inf)                 # only same-category peers count
+        # only same-category peers count. Masked IN PLACE: `D = np.where(same, D, inf)`
+        # allocates a second full float64 block, doubling the peak right where it is
+        # already the largest allocation in the job (7.8 -> 15.7 GB at 200k).
+        np.logical_not(same, out=same)                # reuse the buffer: "different"
+        np.copyto(D, np.inf, where=same)
+        del same
     k = min(int(target_neighbors), D.shape[1] - 1)
     kth = np.partition(D, k, axis=1)[:, k]            # dist to the (k+1)-th nearest
     kth = kth[np.isfinite(kth)]
@@ -105,6 +131,7 @@ def sparsity_report(Z, cutoff, sample=5000, seed=0, dim=None, data_id=None):
     n = len(coords)
     rng = np.random.default_rng(seed)
     idx = rng.choice(n, size=min(sample, n), replace=False)
+    _warn_block_memory(len(idx), n, "sparsity_report")
     D = cdist(coords[idx], coords)
     in_supp = D < cutoff
     if data_id is not None:
