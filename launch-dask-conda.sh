@@ -57,14 +57,37 @@ if [ -f "$lockfile" ]; then
     rm -f "$lockfile"          # stale: the writer is gone
 fi
 
-if pgrep -u "$USER" -f "dask scheduler" > /dev/null 2>&1 \
-   || pgrep -u "$USER" -f "srun.*dask worker" > /dev/null 2>&1; then
-    echo "ERROR: a dask scheduler or a dask srun is already running for $USER" >&2
-    echo "       pids: $(pgrep -u "$USER" -f 'dask scheduler|srun.*dask worker' | tr '\n' ' ')" >&2
-    echo "       Refusing to start a second cluster. To reset:" >&2
-    echo "         pkill -u $USER -f 'dask scheduler'; pkill -u $USER -f 'dask worker'" >&2
-    echo "         pkill -u $USER -f 'srun.*dask'; rm -f $scheduler_file" >&2
-    exit 1
+# Reaching here PROVES no live launch script owns a cluster: the lock check above
+# either found no lockfile or reclaimed one whose writer was gone. So any dask
+# scheduler or dask srun still running belongs to a previous run that failed to clean
+# up, and refusing to start would just make the user run the pkill lines by hand --
+# every time, since nothing would ever remove the orphan. Reclaim it instead.
+#
+# Set NO_RECLAIM=1 to get the old refuse-and-print behaviour, e.g. if you deliberately
+# run a second cluster from another checkout and do not want it touched.
+_stale=$(pgrep -u "$USER" -f 'dask scheduler|dask worker|srun.*dask' 2>/dev/null | tr '\n' ' ')
+if [ -n "${_stale// /}" ]; then
+    if [ -n "${NO_RECLAIM:-}" ]; then
+        echo "ERROR: dask processes already running for $USER (pids: $_stale)" >&2
+        echo "       NO_RECLAIM is set, so refusing to touch them. To reset:" >&2
+        echo "         ./stop-dask.sh" >&2
+        exit 1
+    fi
+    echo "WARNING: found orphaned dask processes from a previous run (pids: $_stale)"
+    echo "         No launch script holds the lock, so these cannot be a live cluster."
+    echo "         Reclaiming them; set NO_RECLAIM=1 to refuse instead."
+    pkill -u "$USER" -f 'srun.*dask'     2>/dev/null || true
+    pkill -u "$USER" -f 'dask worker'    2>/dev/null || true
+    pkill -u "$USER" -f 'dask scheduler' 2>/dev/null || true
+    sleep 2
+    _left=$(pgrep -u "$USER" -f 'dask scheduler|dask worker|srun.*dask' 2>/dev/null | tr '\n' ' ')
+    if [ -n "${_left// /}" ]; then
+        echo "ERROR: could not clear dask processes (still up: $_left)." >&2
+        echo "       Run ./stop-dask.sh, then re-run this script." >&2
+        exit 1
+    fi
+    rm -f "$scheduler_file"
+    echo "         cleared."
 fi
 
 if [ ! -x "$ENV_BIN/python" ]; then
@@ -77,8 +100,32 @@ export PATH="$ENV_BIN:$PATH"
 
 # Claim the lock now that the guards have passed, and release it on ANY exit so a
 # crashed run never blocks the next one.
+#
+# The cleanup MUST also kill the scheduler. An earlier version released only the
+# lockfile, which produced a self-inflicted, perfectly repeatable failure: the
+# scheduler is backgrounded here but the srun below runs in the FOREGROUND, so any
+# exit from that srun -- Ctrl-C, the allocation expiring, a task dying -- ran the trap,
+# removed the lock, and left the scheduler orphaned on the login node. The next launch
+# then passed the lock check (no lockfile) and tripped the pgrep check instead, and
+# since nothing ever cleaned the orphan it failed the same way every subsequent time.
+# The stale scheduler_file goes too: it points at a dead endpoint, and a client that
+# finds one hangs on connect instead of failing.
+cleanup() {
+    local rc=$?
+    if [ -n "${sched_pid:-}" ] && kill -0 "$sched_pid" 2>/dev/null; then
+        echo "[cleanup] stopping scheduler (pid $sched_pid)"
+        kill "$sched_pid" 2>/dev/null || true
+        for _ in $(seq 20); do
+            kill -0 "$sched_pid" 2>/dev/null || break
+            sleep 0.5
+        done
+        kill -9 "$sched_pid" 2>/dev/null || true
+    fi
+    rm -f "$lockfile" "$scheduler_file"
+    echo "[cleanup] released lock and scheduler file (exit $rc)"
+}
 echo $$ > "$lockfile"
-trap 'rm -f "$lockfile"' EXIT
+trap cleanup EXIT
 
 # The repo is not pip-installed, so `wl_gp2scale` is only importable via the CWD --
 # and that does NOT reach the cluster. `dask scheduler`/`dask worker` are installed
