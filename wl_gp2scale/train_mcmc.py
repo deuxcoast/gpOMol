@@ -91,6 +91,10 @@ class RadiusTrainConfig:
     logdet_lanczos_degree: int = 20
     jitter: float = 0.78               # additive kernel is jitter-insensitive (measured)
     warn_fail_frac: float = 0.05
+    # initial MH step as a fraction of the starting value (and of the box width, using
+    # whichever is smaller). fvgp's default is effectively 0.2 of the box, which on our
+    # deliberately-loose boxes gave 0.07 acceptance against a 0.234 target.
+    step_frac: float = 0.06
 
     # plumbing
     batch_size: int = 10_000
@@ -201,6 +205,16 @@ def radius_bounds(chan, y_resid_tr, cat_tr, cfg, names=None):
         print(f"[bounds] {name:>7}: variogram_range="
               f"{'None (no decorrelation seen -> using r_60)' if r_var is None else f'{r_var:.4f}'}"
               f"  centre={centre:.4f}  box=[{lo[i]:.4f}, {hi[i]:.4f}]")
+        # The variogram and the neighbour anchors are independent estimates of the same
+        # length scale. When they disagree by a lot that is a FINDING, not noise: the
+        # variogram is saying the target stays correlated well past the radius the
+        # neighbour-count policy allows, i.e. the frozen policy is starving the kernel.
+        # Say so explicitly, because it is the whole question this run exists to settle.
+        if r_var and r_var > 1.5 * anchors[500]:
+            print(f"[bounds] {name:>7}: NOTE variogram range is {r_var/anchors[500]:.1f}x "
+                  f"the 500-neighbour radius ({anchors[500]:.4f}). The target decorrelates "
+                  f"well beyond anything the frozen grid tests, so expect the chain to "
+                  f"prefer radii off the top of that grid -- and check the density there.")
         print(f"[bounds] {name:>7}: anchors nbrs->r " +
               "  ".join(f"{k}->{v:.3f}" for k, v in anchors.items()) +
               (f"   budget allows ~{n_target_c:,} nbrs (r<={r_hi_budget:.3f})"
@@ -222,7 +236,7 @@ def radius_bounds(chan, y_resid_tr, cat_tr, cfg, names=None):
 # ------------------------------------------------------------------------ proposals
 
 
-def make_proposals(bounds, C):
+def make_proposals(bounds, C, step_frac=0.06, x0=None):
     """Two block-Metropolis proposals: signal variances, and radii.
 
     This is the paper's own "block MCMC". fvgp's default is a SINGLE block over every
@@ -239,7 +253,18 @@ def make_proposals(bounds, C):
     from fvgp.gp_mcmc import ProposalDistribution
 
     lb, ub = np.asarray(bounds)[:, 0], np.asarray(bounds)[:, 1]
-    std = 0.2 * (ub - lb) / np.sqrt(12.0)        # fvgp's own formula (gp_mcmc.py:84)
+    # fvgp's default step is 0.2*(ub-lb)/sqrt(12), i.e. ~6% of the box width. That is
+    # sized for a box you believe in; ours is deliberately loose (4x span around the
+    # centre) so the chain is never pinned by a bound we guessed, and inheriting a step
+    # from a loose box makes every proposal a leap. Measured at 20k: acceptance 0.071 on
+    # both blocks against a 0.234 target, with a fifth of proposals landing outside the
+    # box entirely. Scale the step off the STARTING POINT instead when we have one --
+    # a sensible move is a small fraction of the current value, independent of how
+    # generous the bounds are. The adapter takes over from there.
+    std = step_frac * (ub - lb) / np.sqrt(12.0)
+    if x0 is not None:
+        x0 = np.abs(np.asarray(x0, float))
+        std = np.minimum(std, np.maximum(step_frac * x0, 1e-9))
     i_sv, i_r = np.arange(C), np.arange(C, 2 * C)
     return [
         ProposalDistribution(i_sv, init_prop_Sigma=np.diag(std[i_sv] ** 2), ID="signal_var"),
@@ -393,10 +418,25 @@ def train_radii(chan, y_tr, cat_tr, client, cfg, names=None):
     Xtr = with_category_tag(Ztr, cat_tr)
     Xtr, y_fit_s, order = sort_by_category(Xtr, y_resid)
 
-    # seed the radii at the requested neighbour count, so the chain starts on the grid's
-    # axis rather than wherever the frozen policy happened to sit
-    seed_r = np.array([bmeta[n]["anchors"][cfg.seed_neighbors] for n in names])
+    # Seed at the BOX CENTRE (the variogram estimate), not at the neighbour anchor.
+    #
+    # Measured the hard way: seeding at the 200-neighbour radius put the chain 2.5% into
+    # its own box, because the variogram range came out ~2.5x the 500-neighbour anchor on
+    # both channels. From that corner roughly a fifth of proposals fell outside the box
+    # and the whole run was spent in transit toward the centre rather than sampling
+    # around it -- 20 sweeps moved `pos in box` from 0.03 to 0.09 and were still moving,
+    # so the reported MAP was a waypoint, not an optimum.
+    #
+    # `--seed-neighbors` still sets the ChannelSpec cutoffs that build_channels produces,
+    # and is still what the anchors are reported against; it just no longer decides where
+    # the chain starts.
+    seed_r = np.array([bmeta[n]["centre"] for n in names])
     seed_r = np.clip(seed_r, bounds[C:, 0], bounds[C:, 1])
+    anchor_r = np.array([bmeta[n]["anchors"][cfg.seed_neighbors] for n in names])
+    pos = (seed_r - bounds[C:, 0]) / np.maximum(bounds[C:, 1] - bounds[C:, 0], 1e-12)
+    print(f"[train] seeding radii at the box centre {np.round(seed_r, 4)} "
+          f"(pos in box {np.round(pos, 2)}), not at the {cfg.seed_neighbors}-neighbour "
+          f"anchor {np.round(anchor_r, 4)}")
     specs = [(s, e, float(r)) for (s, e, _), r in zip(specs, seed_r)]
     sv0 = np.full(C, float(np.var(y_resid)) / C)
     init_hps = np.concatenate([sv0, seed_r])
@@ -430,7 +470,8 @@ def train_radii(chan, y_tr, cat_tr, client, cfg, names=None):
           f"10 sweeps. Run with `python -u` so both reach the log promptly.")
 
     res = TrainResult(bounds=bounds, diagnostics=bmeta)
-    props = make_proposals(bounds, C)   # kept, so jump_trace is readable afterwards
+    # kept, so jump_trace is readable afterwards; x0 sizes the steps off the start point
+    props = make_proposals(bounds, C, step_frac=cfg.step_frac, x0=init_hps)
     meta["t0"] = t0 = time.time()
     with SolveWarningCounter() as counter:
         meta["counter"] = counter
