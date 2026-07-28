@@ -50,9 +50,10 @@ def _channel_cutoff(Z_tr, Z_te, cat_tr, cat_te, args):
     if args.target_neighbors:
         return cutoff_for_neighbors(
             Z_tr, Z_te, args.target_neighbors, dim=Z_tr.shape[1],
-            data_id_tr=cat_tr, data_id_te=cat_te,
+            data_id_tr=cat_tr, data_id_te=cat_te, sample=args.diag_sample,
         )
-    c, _ = recalibrate(Z_tr, percentile=args.cutoff_pct, dim=Z_tr.shape[1])
+    c, _ = recalibrate(Z_tr, percentile=args.cutoff_pct, dim=Z_tr.shape[1],
+                       sample=args.diag_sample)
     return c
 
 
@@ -164,6 +165,17 @@ def _gp_r2_channels(chan, y_tr, cat_tr, y_te, cat_te, client, args, mean_chan=No
     var = float(np.var(y_fit))
     signal_var = [var / C] * C                        # equal split -> diagonal = var(y)
 
+    # A FROZEN run never reads log|KV| (fvgp computes it in the constructor, but only
+    # gp_marginal_likelihood consumes it), so a loose rtol lets imate stop at its
+    # sample floor instead of refining a number we discard. --train DOES consume it:
+    # at rtol 0.5 the logdet term of the objective carries +-50% relative error and
+    # the optimiser is chasing that noise, so the trained variances cannot be trusted.
+    # build_gp's docstring has said "tighten to 0.01 under --train" all along; this
+    # wires it up rather than leaving it as advice.
+    rtol = args.logdet_rtol
+    if rtol is None:
+        rtol = 0.01 if getattr(args, "train", False) else 0.5
+
     t0 = time.time()
     gp, _ = build_gp(
         Xtr, y_fit_s, None, None, client,
@@ -171,7 +183,7 @@ def _gp_r2_channels(chan, y_tr, cat_tr, y_te, cat_te, client, args, mean_chan=No
         jitter=(args.jitter if jitter is None else jitter),
         batch_size=args.batch_size,
         compute_device="cpu", device=args.device, linalg_mode=args.linalg,
-        cg_maxiter=args.cg_maxiter, cg_tol=args.cg_tol,
+        cg_maxiter=args.cg_maxiter, cg_tol=args.cg_tol, logdet_rtol=rtol,
     )
     if getattr(args, "train", False):
         bounds = [[1e-6, 10.0 * var]] * C             # per-channel signal-var bounds
@@ -255,7 +267,9 @@ def run(args, client):
     rows, nuggets = [], []
     print(f"[sweep] config: channels={modes} scaling={args.scaling} "
           f"prior_mean={args.prior_mean} target_nbrs={args.target_neighbors} "
-          f"train={args.train} pls={args.pls} jitter={args.jitter:g} linalg={args.linalg}")
+          f"train={args.train} pls={args.pls} jitter={args.jitter:g} linalg={args.linalg} "
+          f"diag_sample={args.diag_sample} "
+          f"jitter_sweep={args.jitter_sweep} logdet_rtol={args.logdet_rtol}")
 
     for seed in args.seeds:
         print(f"\n########## split seed {seed} ##########")
@@ -303,7 +317,8 @@ def run(args, client):
         for mode in modes:
             chan = ([emb[m] for m in singles] if mode == "additive" else [emb[mode]])
             for c in chan:
-                sparsity_report(c["Ztr"], c["cutoff"], dim=c["Ztr"].shape[1], data_id=cat_tr)
+                sparsity_report(c["Ztr"], c["cutoff"], dim=c["Ztr"].shape[1],
+                                data_id=cat_tr, sample=args.diag_sample)
             ols = _ols_r2(mean_chan if mean_chan else chan, y_tr, y_te)
             # measured PER MODE: the additive kernel's duplicate structure is not the
             # same as any single channel's, so one global nugget would be wrong
@@ -314,26 +329,47 @@ def run(args, client):
                                         args.nugget_min_pairs)
                 if ng is not None:
                     jit = ng
-            nuggets.append((seed, CHANNEL_CODE[mode], jit))
-            gp_r2 = _gp_r2_channels(chan, y_tr, cat_tr, y_te, cat_te, client, args,
-                                    mean_chan=mean_chan, jitter=jit)
+            # --jitter-sweep reuses THIS mode's embeddings for every noise level. The
+            # embeddings do not depend on jitter, and featurisation is ~94% of a rung's
+            # wall time (304s vs 20s of GP at 20k), so sweeping jitter as separate
+            # processes spends almost all of it recomputing identical arrays. Explicit
+            # values win over --measure-nugget, which still runs so its table is on the
+            # record next to the levels actually solved.
+            jitters = list(args.jitter_sweep) if args.jitter_sweep else [jit]
             cuts = "+".join(f"{c['cutoff']:.3f}" for c in chan)
             extra = f"  mean+={'+'.join(mean_only)}" if mean_only else ""
-            print(f"[sweep] seed={seed} mode={mode:>8}  cutoffs={cuts}  "
-                  f"jitter={jit:.4g}  OLS_R2={ols:.4f}  GP_R2={gp_r2:.4f}{extra}")
-            rows.append((seed, CHANNEL_CODE[mode], ols, gp_r2))
+            for jv in jitters:
+                if args.jitter_sweep:
+                    print(f"[sweep] --- seed={seed} mode={mode} jitter={jv:g} "
+                          f"(embeddings reused) ---")
+                gp_r2 = _gp_r2_channels(chan, y_tr, cat_tr, y_te, cat_te, client, args,
+                                        mean_chan=mean_chan, jitter=jv)
+                print(f"[sweep] seed={seed} mode={mode:>8}  cutoffs={cuts}  "
+                      f"jitter={jv:.4g}  OLS_R2={ols:.4f}  GP_R2={gp_r2:.4f}{extra}")
+                # rows and nuggets stay INDEX-ALIGNED (one entry each per solve), which
+                # is what lets the .npz keep its 4-column schema while still recording
+                # which noise produced which R^2.
+                rows.append((seed, CHANNEL_CODE[mode], ols, gp_r2))
+                nuggets.append((seed, CHANNEL_CODE[mode], jv))
 
     print("\n================= SUMMARY =================")
-    print(f"{'seed':>5} {'mode':>9} {'OLS_R2':>8} {'GP_R2':>8}")
+    print(f"{'seed':>5} {'mode':>9} {'jitter':>10} {'OLS_R2':>8} {'GP_R2':>8}")
     inv = {v: k for k, v in CHANNEL_CODE.items()}
-    for s, code, ols, gp in rows:
-        print(f"{s:>5} {inv[int(code)]:>9} {ols:>8.4f} {gp:>8.4f}")
+    for (s, code, ols, gp), (_, _, jv) in zip(rows, nuggets):
+        print(f"{s:>5} {inv[int(code)]:>9} {jv:>10.4g} {ols:>8.4f} {gp:>8.4f}")
     print("\n--- GP_R2 across seeds, by channel ---")
+    # When sweeping jitter, aggregate per (channel, jitter): pooling noise levels into
+    # one mean would report the spread BETWEEN arms as if it were seed variance.
+    levels = sorted(set(args.jitter_sweep)) if args.jitter_sweep else [None]
     for mode in modes:
-        vals = np.array([gp for (s, code, ols, gp) in rows if int(code) == CHANNEL_CODE[mode]])
-        if len(vals):
-            print(f"  {mode:>8}: GP_R2 mean={vals.mean():.4f}  std={vals.std():.4f}  "
-                  f"n={len(vals)}  values={np.round(vals, 4)}")
+        for lv in levels:
+            vals = np.array([gp for (s, code, ols, gp), (_, _, jv) in zip(rows, nuggets)
+                             if int(code) == CHANNEL_CODE[mode]
+                             and (lv is None or jv == lv)])
+            if len(vals):
+                tag = f"{mode:>8}" + (f" @ jitter {lv:<9.4g}" if lv is not None else "")
+                print(f"  {tag}: GP_R2 mean={vals.mean():.4f}  std={vals.std():.4f}  "
+                      f"n={len(vals)}  values={np.round(vals, 4)}")
     if args.out:
         np.savez(args.out, rows=np.array(rows, dtype=float),
                  channels=np.array(modes), seeds=np.array(args.seeds),
@@ -424,6 +460,12 @@ def main():
                     help="observation-noise variance sigma^2 (goes straight to "
                          "noise_variances). The 1e-6 default is the setting that "
                          "caused the historical CG stall -- prefer --measure-nugget")
+    ap.add_argument("--jitter-sweep", type=float, nargs="+", default=None,
+                    help="solve each channel mode at EVERY one of these noise "
+                         "variances, reusing one featurisation pass (which is ~94%% of "
+                         "a rung's wall time). Overrides --jitter/--measure-nugget for "
+                         "the solve; the nugget table is still printed if requested. "
+                         "Use 0 with care -- an exactly singular Gram, not a small one")
     ap.add_argument("--measure-nugget", action="store_true",
                     help="measure the variogram nugget on the built embedding and use "
                          "it as sigma^2 instead of --jitter (per mode, per seed)")
@@ -436,6 +478,18 @@ def main():
     ap.add_argument("--batch-size", type=int, default=10_000)
     ap.add_argument("--pred-batch", type=int, default=2000)
     ap.add_argument("--linalg", default="sparseCG")
+    ap.add_argument("--logdet-rtol", type=float, default=None,
+                    help="imate stochastic-Lanczos relative error for log|KV| (fvgp's "
+                         "'random_logdet_error_rtol'). Default: 0.5 frozen, where the "
+                         "value is computed but never read, and 0.01 under --train, "
+                         "where it is a term of the objective being maximised")
+    ap.add_argument("--diag-sample", type=int, default=5000,
+                    help="rows sampled by the DRIVER-side cutoff/sparsity diagnostics. "
+                         "Each builds a dense (sample x n_train) float64 block on the "
+                         "driver: 0.64 GB at 20k but 7.8 GB at 200k, where it is the "
+                         "job's largest allocation. Lower it (~1000) at scale. Note "
+                         "this also sets the cutoff, so it is not purely diagnostic -- "
+                         "a smaller sample is a noisier median, not a biased one")
     ap.add_argument("--cg-maxiter", type=int, default=None,
                     help="cap CG iterations so an ill-conditioned split fails fast")
     ap.add_argument("--cg-tol", type=float, default=None, help="CG relative tolerance")
