@@ -181,7 +181,13 @@ def radius_bounds(chan, y_resid_tr, cat_tr, cfg, names=None):
             anchors[k] = cutoff_for_neighbors(Ztr, Zte, k, dim=d, sample=cfg.diag_sample)
         sv = semivariogram(Ztr, y_resid_tr, sample=cfg.diag_sample, cat=cat_tr)
         r_var = range_from_variogram(sv["lag"], sv["gamma"], sv["sill"])
-        centre = r_var if r_var else anchors[60]
+        # Fall back to the anchor the run was ASKED to start from, not to r_60. On this
+        # data range_from_variogram legitimately returns None (the variogram does not
+        # plateau -- see its docstring), so the fallback is the normal path, not an edge
+        # case, and it should land where the empirical R^2-vs-neighbours evidence points
+        # rather than at the bottom of the grid.
+        centre = r_var if r_var else anchors[cfg.seed_neighbors]
+        gamma_over_sill = float(np.max(sv["gamma"]) / sv["sill"]) if sv["sill"] else float("nan")
         # If the budget allows more neighbours than there ARE points, memory is not the
         # binding constraint -- the dataset is. Distinguish the two, or a tiny run
         # reports "budget-limited" when it is nothing of the sort.
@@ -203,7 +209,7 @@ def radius_bounds(chan, y_resid_tr, cat_tr, cfg, names=None):
             "frac_zero_at_lo": float(sp["frac_zero_neighbor"]),
         }
         print(f"[bounds] {name:>7}: variogram_range="
-              f"{'None (no decorrelation seen -> using r_60)' if r_var is None else f'{r_var:.4f}'}"
+              f"{f'None (gamma/sill peaks at {gamma_over_sill:.2f}; unsaturated, so no ' f'correlation length -- using the {cfg.seed_neighbors}-nbr anchor)' if r_var is None else f'{r_var:.4f}'}"
               f"  centre={centre:.4f}  box=[{lo[i]:.4f}, {hi[i]:.4f}]")
         # The variogram and the neighbour anchors are independent estimates of the same
         # length scale. When they disagree by a lot that is a FINDING, not noise: the

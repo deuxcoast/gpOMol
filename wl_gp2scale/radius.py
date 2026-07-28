@@ -265,18 +265,38 @@ def semivariogram(Z, y, sample=5000, n_bins=20, cat=None, seed=0):
     }
 
 
-def range_from_variogram(lag, gamma, sill, sill_frac=0.95):
+def range_from_variogram(lag, gamma, sill, sill_frac=0.95, max_overshoot=1.5):
     """Effective range: the smallest lag at which gamma reaches ``sill_frac`` * sill.
 
     Model-free (no covariance-model fit). Returns None if gamma never reaches the
     threshold within the sampled distances (no decorrelation observed -> the radius is
     larger than the data resolves, or the signal is representational not spatial).
-    A scipy.optimize.curve_fit spherical/exponential-model range is a drop-in
-    refinement if a smoother estimate is wanted.
+
+    ALSO returns None when gamma does not PLATEAU, which is the case that bit us. A
+    range is only meaningful for a variogram that rises and then flattens at the sill:
+    the crossing then marks where correlation dies. If gamma keeps climbing past the
+    sill there is residual drift (large-scale structure the prior mean did not remove),
+    the "sill" is just the average of a rising curve rather than gamma(inf), and the
+    crossing is wherever that rising line happens to cut its own mean -- an arbitrary
+    point with no correlation-length interpretation.
+
+    Measured on OMol25 at 20k, on the residual after the linear prior mean: gamma/sill
+    reached 3.38 (WL) and 3.91 (geometry) in the outermost bin, rising monotonically
+    throughout with no flat region anywhere. The unguarded version returned 0.91 and
+    3.74, i.e. 2.6x and 2.4x the 500-neighbour radius, and those numbers were used to
+    centre the MCMC bounds -- so the chain was handed a box centred on an artifact.
+    Bins are equal-count, so this is not a sparse-tail effect: 25-30% of sampled pairs
+    lie at or beyond the reported "range".
+
+    ``max_overshoot`` is how far above the sill gamma may go before the curve is judged
+    unsaturated. 1.5 is loose enough for ordinary noise in the outer bins and far below
+    the ~4x seen when there is real drift.
     """
     lag = np.asarray(lag, float)
     gamma = np.asarray(gamma, float)
     if lag.size == 0 or not np.isfinite(sill) or sill <= 0:
         return None
+    if gamma.max() > max_overshoot * sill:
+        return None                       # unbounded: drift, not a correlation length
     hit = np.where(gamma >= sill_frac * sill)[0]
     return float(lag[hit[0]]) if hit.size else None
