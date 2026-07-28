@@ -99,6 +99,11 @@ class RadiusTrainConfig:
     burn_in_frac: float = 0.3
     checkpoint: str | None = None
     out: str | None = None
+    # observability. A chain is hours long and the ONLY per-sample hook fvgp leaves us
+    # is the prior (run_in_every_iteration is not forwarded by GPtraining.train), so
+    # progress reporting lives there. 20 proposals ~= 10 sweeps at 2 blocks, matching
+    # fvgp's own info cadence so the two interleave rather than fight.
+    log_every: int = 20
 
 
 @dataclass
@@ -260,7 +265,9 @@ def nnz_budget_prior(meta):
        Estimated driver-side on a subsample via `conditioning.sparse_wendland_gram` --
        milliseconds against a covariance build costing tens of seconds -- and rejected
        for free before any worker is asked to do anything.
-    3. Trace + warning-count logging, and the checkpoint write.
+    3. Progress reporting, trace + warning-count logging, and the checkpoint write.
+       This is the ONLY place any of that can happen: a chain runs for hours, and
+       everything else in this module prints either before it starts or after it ends.
     """
     C = meta["C"]
 
@@ -274,9 +281,13 @@ def nnz_budget_prior(meta):
         rec = (time.time(), theta.copy(), float(nnz),
                dict(meta["counter"].counts) if meta.get("counter") else {})
         meta["log"].append(rec)
-        if meta.get("checkpoint") and len(meta["log"]) % 25 == 0:
+        n = len(meta["log"])
+        if meta.get("checkpoint") and n % 25 == 0:
             _write_checkpoint(meta)
+        if meta.get("log_every") and n % meta["log_every"] == 0:
+            _progress(meta, n, theta, nnz)
         if not inside:
+            meta["n_box_rejects"] += 1
             return -np.inf
         if np.isfinite(nnz) and nnz > meta["nnz_budget"]:
             meta["n_budget_rejects"] += 1
@@ -284,6 +295,39 @@ def nnz_budget_prior(meta):
         return 0.0
 
     return prior
+
+
+def _progress(meta, n, theta, nnz):
+    """One line per ``log_every`` proposals, from inside the prior.
+
+    Reports what actually goes wrong on a long chain: the radii drifting toward a bound,
+    the nnz creeping toward the memory budget, solves quietly failing to converge, and
+    the cost per evaluation rising as the radius grows (so the ETA from the first few
+    minutes is not the ETA for the run). ``flush=True`` because this is typically
+    redirected to a file and a stalled run must not look like a quiet one.
+    """
+    C, total = meta["C"], meta["n_total_proposals"]
+    el = time.time() - meta["t0"]
+    per = el / max(n, 1)
+    eta = per * max(total - n, 0)
+    warns = sum(meta["counter"].counts.values()) if meta.get("counter") else 0
+    r = np.asarray(theta[C:], float)
+    lo, hi = meta["bounds"][C:, 0], meta["bounds"][C:, 1]
+    frac = (r - lo) / np.maximum(hi - lo, 1e-12)      # 0 = at lower bound, 1 = at upper
+    print(f"[mcmc] {n:>5}/{total} ({100.0*n/total:4.1f}%)  "
+          f"elapsed {el/60:6.1f}m  {per:5.1f}s/prop  eta {eta/60:6.1f}m  "
+          f"r={np.array2string(r, precision=4, floatmode='fixed')} "
+          f"(pos in box {np.array2string(frac, precision=2, floatmode='fixed')})  "
+          # nnz is only computed for in-box proposals; out-of-box ones are rejected
+          # before the estimate, so report that rather than a bare nan
+          f"nnz={'out-of-box' if not np.isfinite(nnz) else f'{nnz:.3g}'}"
+          f"/{meta['nnz_budget']:.3g}  "
+          f"rej box/budget={meta['n_box_rejects']}/{meta['n_budget_rejects']}  "
+          f"noconv={warns}", flush=True)
+    if frac.max() > 0.95 or frac.min() < 0.05:
+        print("[mcmc]   ^ a radius is sitting against its bound; if it stays there the "
+              "BOUND chose it, not the likelihood (see at_bound in the summary)",
+              flush=True)
 
 
 def estimate_union_nnz(radii, meta):
@@ -309,11 +353,19 @@ def _write_checkpoint(meta):
     import numpy as _np
 
     log = meta["log"]
+    keys = sorted(log[-1][3]) if log and log[-1][3] else []
     _np.savez(meta["checkpoint"],
               theta=_np.array([r[1] for r in log], dtype=float),
               t=_np.array([r[0] for r in log], dtype=float),
               nnz=_np.array([r[2] for r in log], dtype=float),
-              bounds=meta["bounds"], n_budget_rejects=meta["n_budget_rejects"])
+              # cumulative non-convergence per proposal: the DELTA between consecutive
+              # rows attributes failures to the specific likelihood evaluation that
+              # produced them, which is the only per-sample attribution available.
+              warn_counts=_np.array([[r[3].get(k, 0) for k in keys] for r in log],
+                                    dtype=float),
+              warn_keys=_np.array(keys),
+              bounds=meta["bounds"], n_budget_rejects=meta["n_budget_rejects"],
+              n_box_rejects=meta["n_box_rejects"])
 
 
 # ------------------------------------------------------------------------- driver
@@ -357,8 +409,11 @@ def train_radii(chan, y_tr, cat_tr, client, cfg, names=None):
                  for n in names],
         "cat_sub": np.asarray(cat_tr)[sub],
         "nnz_budget": cfg.budget_gb * 1e9 / 12.0,
-        "log": [], "n_budget_rejects": 0, "bounds": bounds,
+        "log": [], "n_budget_rejects": 0, "n_box_rejects": 0, "bounds": bounds,
         "checkpoint": cfg.checkpoint, "counter": None,
+        "log_every": cfg.log_every, "t0": time.time(),
+        # 2 proposal blocks -> 2 prior calls per sweep; drives the progress ETA
+        "n_total_proposals": 2 * cfg.n_updates,
     }
 
     gp, _ = build_gp(
@@ -371,19 +426,27 @@ def train_radii(chan, y_tr, cat_tr, client, cfg, names=None):
     print(f"[train] {C} channels, {2*C} hyperparameters, init={np.round(init_hps, 4)}")
     print(f"[train] {cfg.n_updates} sweeps x 2 blocks ~= {2*cfg.n_updates} likelihood "
           f"evaluations, each a full sparse covariance rebuild")
+    print(f"[train] progress every {cfg.log_every} proposals; fvgp reports f(x) every "
+          f"10 sweeps. Run with `python -u` so both reach the log promptly.")
 
     res = TrainResult(bounds=bounds, diagnostics=bmeta)
-    t0 = time.time()
+    props = make_proposals(bounds, C)   # kept, so jump_trace is readable afterwards
+    meta["t0"] = t0 = time.time()
     with SolveWarningCounter() as counter:
         meta["counter"] = counter
         hps_median = train_hyperparameters(
-            gp, bounds, max_iter=cfg.n_updates, info=False,
+            # info=True: fvgp prints the log-likelihood every 10 sweeps. It is the one
+            # quantity the prior cannot report (the prior runs BEFORE the likelihood),
+            # and a flat or wildly swinging f(x) is the first sign of a bad chain.
+            gp, bounds, max_iter=cfg.n_updates, info=True,
             init_hyperparameters=init_hps,
-            mcmc_prop_distrs=make_proposals(bounds, C),
+            mcmc_prop_distrs=props,
             mcmc_prior=nnz_budget_prior(meta),
         )
     wall = time.time() - t0
-    n_evals = max(len(meta["log"]) - meta["n_budget_rejects"], 1)
+    # both rejection kinds short-circuit BEFORE the likelihood, so neither cost a solve
+    n_evals = max(len(meta["log"]) - meta["n_budget_rejects"]
+                  - meta["n_box_rejects"], 1)
 
     info = getattr(gp, "mcmc_info", {}) or {}
     trace = np.asarray(info.get("x", np.empty((0, 2 * C))), dtype=float)
@@ -396,6 +459,25 @@ def train_radii(chan, y_tr, cat_tr, client, cfg, names=None):
     res.n_likelihood_evals = n_evals
     res.sec_per_eval = wall / n_evals
     res.warn_counts = dict(counter.counts)
+    # Per-block acceptance. The adapter targets 0.234; far below means the proposal is
+    # too bold and the chain is stuck, far above means it is crawling. Reported per
+    # block because that asymmetry is the whole reason for blocking in the first place.
+    for p in props:
+        jt = np.asarray(getattr(p, "jump_trace", []), dtype=float).ravel()
+        b = int(cfg.burn_in_frac * len(jt))
+        res.accept[p.ID] = float(jt[b:].mean()) if len(jt) > b else float("nan")
+    print(f"[train] wall {wall/60:.1f}m, {n_evals} likelihood evals "
+          f"({meta['n_box_rejects']} box + {meta['n_budget_rejects']} budget rejects "
+          f"cost no solve), {res.sec_per_eval:.1f}s/eval")
+    print("[train] acceptance (target 0.234): "
+          + "  ".join(f"{k}={v:.3f}" for k, v in res.accept.items()))
+    for k, v in res.accept.items():
+        if np.isfinite(v) and not (0.10 <= v <= 0.60):
+            print(f"[train]   ^ the {k} block is {'crawling' if v > 0.6 else 'stuck'} "
+                  f"at {v:.2f}: steps are too "
+                  f"{'small' if v > 0.6 else 'bold'}, so it is exploring very little of "
+                  f"its range. Treat its posterior as unconverged regardless of "
+                  f"n_updates.")
     counter.report(n_evals=n_evals, fail_frac=cfg.warn_fail_frac, label="train")
 
     # a radius pinned to a bound means the BUDGET chose it, not the likelihood
