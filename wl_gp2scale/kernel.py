@@ -68,12 +68,21 @@ except Exception:  # pragma: no cover - torch is a hard dependency at run time
 
 def pick_device(device: Optional[str] = None) -> str:
     """Return an explicit torch device string. 'cuda' if available, else 'cpu'.
-    Passing an explicit device wins (used by validation to force CPU)."""
+
+    Passing an explicit device wins (used by validation to force CPU) -- but only
+    where it is actually satisfiable. Asking for 'cuda' on a host with no GPU used to
+    be honoured verbatim and then died deep inside torch's lazy init
+    ("RuntimeError: No CUDA GPUs are available") on the first kernel evaluation. That
+    is reachable in normal operation: gp2Scale evaluates training blocks on the dask
+    workers, which sit on GPU nodes, but the prediction cross-covariance is computed
+    in the DRIVER process, which need not be on one. Fall back instead of dying.
+    """
+    have_cuda = torch is not None and torch.cuda.is_available()
     if device is not None:
+        if str(device).startswith("cuda") and not have_cuda:
+            return "cpu"
         return device
-    if torch is not None and torch.cuda.is_available():
-        return "cuda"
-    return "cpu"
+    return "cuda" if have_cuda else "cpu"
 
 
 # ----------------------------------------------------------------------------
@@ -162,10 +171,14 @@ class WLBlockKernel:
     def __post_init__(self):
         if torch is None:
             raise ImportError("wl_gp2scale.kernel requires PyTorch.")
-        self._device = pick_device(self.device)
         self._tdtype = torch.float32 if self.dtype == "float32" else torch.float64
         if self.backend not in ("wendland32", "wendland_d0"):
             raise ValueError("backend must be 'wendland32' or 'wendland_d0'")
+
+    @property
+    def _device(self) -> str:
+        """Resolved per process at call time -- see AdditiveWendlandKernel._device."""
+        return pick_device(self.device)
 
     # -- split coordinates / category tag ------------------------------------
     def _split(self, x):
@@ -288,9 +301,23 @@ class AdditiveWendlandKernel:
         for c in self.channels:
             if c.backend not in ("wendland32", "wendland_d0"):
                 raise ValueError("backend must be 'wendland32' or 'wendland_d0'")
-        self._device = pick_device(self.device)
         self._tdtype = torch.float32 if self.dtype == "float32" else torch.float64
         self._total_dim = self.channels[-1].stop
+
+    @property
+    def _device(self) -> str:
+        """Resolved PER PROCESS at call time, NOT cached in ``__post_init__``.
+
+        gp2Scale constructs this kernel on the driver and pickles it to the dask
+        workers, so a device string decided in the constructor is one process's answer
+        imposed on every other. Caching it meant the driver's verdict shipped to the
+        workers: on a CPU-only driver the workers would silently lose their GPUs, and
+        with an explicit ``--device cuda`` the driver instead inherited a 'cuda' it
+        could not honour and crashed in ``predict``. Resolving here lets one object
+        build training blocks on the worker GPUs and the prediction cross-covariance
+        on whatever the driver has.
+        """
+        return pick_device(self.device)
 
     def _psi(self, t, ch: ChannelSpec):
         if ch.backend == "wendland32":
