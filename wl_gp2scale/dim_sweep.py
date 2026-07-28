@@ -178,11 +178,15 @@ def _gp_r2_channels(chan, y_tr, cat_tr, y_te, cat_te, client, args, mean_chan=No
         hps = train_hyperparameters(gp, bounds, max_iter=args.train_iter)
         print(f"[sweep]   trained signal vars -> {np.round(np.asarray(hps), 5)}")
     t_build = time.time() - t0
+    # Printed BEFORE predict on purpose: this timing IS the measurement a scaling rung
+    # exists to produce, and it used to be lost whenever predict raised (a driver with
+    # no GPU took down an otherwise complete solve, and the jitter arm it belonged to
+    # had to be re-run from featurisation).
+    print(f"[sweep]   build(+solve){'+train' if args.train else ''}={t_build:.1f}s")
     m, _ = predict(gp, Xte, batch=args.pred_batch, variance=False)
     if mean is not None:
         m = m + mean.predict(Mte)                     # add the linear mean back
     r2 = float(r2_score(y_te, m))
-    print(f"[sweep]   build(+solve){'+train' if args.train else ''}={t_build:.1f}s")
     del gp
     release_gp(client)
     return r2
