@@ -126,11 +126,25 @@ dataset construction regardless of what the reliability diagram says.
 `(n_train, n_pred)` cross-covariance — **one linear solve per test point**, against one
 solve total for the mean.
 
-**Use `sparseCG` with block Krylov for calibration runs, not `sparseMINRES`.** From the
-fvgp audit: `_resolve_krylov_mode` is called only from `calculate_sparse_conj_grad`;
-`calculate_sparse_minres` has no block path and loops per column. So the solver we
-adopted for its stability is the wrong one for many right-hand sides. Set
-`args["sparse_krylov_mode"] = "block"` and verify the speedup rather than assuming it.
+From the fvgp audit: `_resolve_krylov_mode` is called only from
+`calculate_sparse_conj_grad`; `calculate_sparse_minres` has no block path and loops per
+column. I predicted from this that MINRES would be the wrong solver for many
+right-hand sides.
+
+**Measured (Step 0, n_train=1200, n_test=300), and the prediction was only half right:**
+
+| solver | wall | vs plain CG |
+|---|---|---|
+| `sparseCG` | 3.1s | — |
+| `sparseCG` + `sparse_krylov_mode="block"` | **1.3s** | **2.36×** |
+| `sparseMINRES` | 1.4s | 2.21× |
+
+**Block CG is a real 2.4× win over plain CG** — use it. But **MINRES matches block CG**
+(1.07×), so the claim that MINRES is the wrong solver for variance is *not* supported at
+this scale. Its per-column loop is not the bottleneck here.
+
+Caveat: 300 test points is small, and per-column overhead should scale worse than a block
+path. Re-time at n_test = 4000 before committing to a solver for the full run.
 
 Budget by measurement, not by guess: time 500 test points first, then extrapolate. Keep
 `--cg-maxiter` finite and the `SolveWarningCounter` armed — an unconverged variance solve
@@ -141,10 +155,31 @@ be much harder to notice than a corrupted μ*.
 
 ## 5. Sequence
 
-**Step 0 — verify the variance is right at all.** `validate.sparse_vs_dense_parity`
-currently compares posterior *means* only. Extend it to variance and check the sparse
-gp2Scale variance against a dense reference GP on a 2–3k slice. Everything downstream is
-worthless if this fails, and nothing in the repo has ever tested it.
+**Step 0 — verify the variance is right at all. ✅ DONE, PASSES.**
+`validate.sparse_vs_dense_parity` now takes `check_variance=True` and compares the sparse
+gp2Scale posterior variance against the dense Cholesky reference on the same kernel, same
+cutoff, same data — the only difference being the linear algebra.
+
+| solver | mean rel diff | **variance rel diff** | var corr | negatives | over-prior |
+|---|---|---|---|---|---|
+| `sparseCG` | 2.3e-05 | **1.4e-10** | 1.000000 | 0 | 0 |
+| `sparseCG` [block] | 2.3e-05 | **1.4e-10** | 1.000000 | 0 | 0 |
+| `sparseMINRES` | 2.1e-04 | **1.0e-09** | 1.000000 | 0 | 0 |
+
+Sparse and dense variance ranges match exactly ([0.1166, 0.2887] against a prior of
+0.2896), so the posterior correction is genuinely being applied rather than silently
+falling back to the prior.
+
+Worth noting the variance parity is ~5 orders of magnitude *tighter* than the mean
+parity. That is expected rather than suspicious: the variance is
+`diag(kk) − kᵀ(KV)⁻¹k`, dominated by the exact diagonal term, with the solve entering
+only through a correction that is at most ~60% of the prior here. **Solve error affects
+the variance far less than the mean** — good news for calibration, and it means a loose
+solver tolerance is less dangerous for σ* than for μ*.
+
+The two guards beyond tolerance are the ones that would catch a genuinely broken solve:
+zero negative variances, and zero points exceeding the prior variance (the posterior
+cannot be more uncertain than the prior).
 
 **Step 1 — add `var_mean(x*)`** (§2.1) to `pipeline.predict`, behind a flag so existing
 behaviour is reproducible.

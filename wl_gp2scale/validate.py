@@ -34,7 +34,7 @@ from .reduce import SparsePLS, batch_pls_r2, regression_r2
 
 def sparse_vs_dense_parity(
     Z_tr, y_tr, Z_te, cutoff, client, y_te=None, jitter=1e-6, tol=1e-3, device="cpu",
-    linalg_mode="sparseCG", solve_maxiter=None, solve_tol=None,
+    linalg_mode="sparseCG", solve_maxiter=None, solve_tol=None, check_variance=False,
 ):
     """Compare gp2Scale/sparseCG posterior mean vs the dense scipy.cdist Wendland
     GP on the SAME embedding. Returns a dict with max abs diff and correlation.
@@ -81,7 +81,7 @@ def sparse_vs_dense_parity(
         batch_size=10_000, compute_device="cpu", device=device,
         linalg_mode=linalg_mode, solve_maxiter=solve_maxiter, solve_tol=solve_tol,
     )
-    m_sparse, _ = predict(gp_sparse, Xte)
+    m_sparse, v_sparse = predict(gp_sparse, Xte, variance=check_variance)
 
     diff = float(np.max(np.abs(m_sparse - m_dense)))
     scale = float(np.std(m_dense)) or 1.0
@@ -100,6 +100,46 @@ def sparse_vs_dense_parity(
             f"(compare to descriptor_eval/gp_parity.py ~0.09-0.12)"
         )
         out.update({"r2_sparse": r2_sp, "r2_dense": r2_de})
+
+    if check_variance:
+        # THE POSTERIOR VARIANCE HAS NEVER BEEN CHECKED AGAINST ANYTHING. Every parity
+        # test in this repo compares posterior MEANS, and the mean is the easy half: it
+        # needs one solve, and an error in it shows up immediately as bad R^2. The
+        # variance needs one solve PER TEST POINT (gp_posterior.py: KVsolve(k) with k
+        # shaped (n_train, n_pred)), and a wrong variance is invisible on every metric we
+        # have ever plotted. Since calibration is the property the OMol25 position paper
+        # actually rests its case on, an unverified variance would make the whole
+        # calibration exercise meaningless. Hence: dense Cholesky reference, same kernel,
+        # same cutoff, same data -- the ONLY difference is the linear algebra.
+        v_dense = _first(gp_dense.posterior_covariance(np.asarray(Z_te, float),
+                                                       variance_only=True),
+                         ["v(x)", "S(x)", "variance"])
+        v_dense = np.asarray(v_dense, float).ravel()
+        vd = float(np.max(np.abs(v_sparse - v_dense)))
+        vscale = float(np.mean(v_dense)) or 1.0
+        vcorr = float(np.corrcoef(v_sparse, v_dense)[0, 1])
+        # A negative variance is not a tolerance question -- it is a broken solve. fvgp
+        # clips tiny negatives, so anything surviving here is real.
+        n_neg = int((v_sparse < 0).sum())
+        # The prior variance is the ceiling: with no in-support neighbour the posterior
+        # cannot be more uncertain than the prior. Exceeding it means the solve diverged.
+        n_over = int((v_sparse > sv * (1 + 1e-6)).sum())
+        v_ok = (vd / vscale < tol) and n_neg == 0 and n_over == 0
+        print(
+            f"[val] VARIANCE parity: max|Δ|={vd:.3e} (rel {vd/vscale:.1e}), "
+            f"corr={vcorr:.6f}, negatives={n_neg}, over-prior={n_over} "
+            f"[{linalg_mode}] -> {'PASS' if v_ok else 'FAIL'}"
+        )
+        print(
+            f"[val]   sparse var: mean={v_sparse.mean():.4g} "
+            f"[{v_sparse.min():.4g}, {v_sparse.max():.4g}] | "
+            f"dense var: mean={v_dense.mean():.4g} "
+            f"[{v_dense.min():.4g}, {v_dense.max():.4g}] | prior sv={sv:.4g}"
+        )
+        out.update({"var_max_abs_diff": vd, "var_rel_diff": vd / vscale,
+                    "var_corr": vcorr, "var_negatives": n_neg,
+                    "var_over_prior": n_over, "var_pass": v_ok})
+        out["pass"] = out["pass"] and v_ok
     return out
 
 
