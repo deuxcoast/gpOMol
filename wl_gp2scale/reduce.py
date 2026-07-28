@@ -271,18 +271,78 @@ class LinearEmbeddingMean:
     GP" route, needed only when the mean is trained jointly). For frozen-hyperparameter
     predict the point predictions are identical, and the manual detrend cannot perturb
     the sparse solve.
+
+    SIZE INTERACTION (``size=`` on fit/predict). Passing per-molecule atom counts adds
+    ``[n, log n, sqrt n, n^3]`` AND the interaction block ``z * log n``, i.e.
+    ``m(z, n) = b0 + b^T z + c^T s(n) + d^T (z log n)``. Measured at 20k, held out:
+
+        mean                              var(resid)   test R^2
+        linear embedding (the default)       10.74       0.6262
+        + size terms only                    10.67       0.6273
+        + element counts                     10.29       0.6355
+        + size x embedding  <-- this         8.60        0.7292
+
+    **+0.103 R^2, and the interaction is the whole effect** -- size on its own buys
+    0.001. The target has already been residualised against an ExtensiveMean over
+    per-element counts plus [charge, |charge|, charge^2, spin, n^2] (data.py), so
+    composition and size are gone LINEARLY and independently of the descriptors. What
+    survives is that the embedding's relationship to the residual SCALES with molecule
+    size, which no additive composition model can express.
+
+    For scale: the gp2Scale kernel has never contributed more than +0.028 over the
+    linear mean, so this one term is roughly 4x the entire kernel, at no Gram block, no
+    neighbour requirement, and applying to every test point including the uncovered ones.
+
+    It does NOT fix the unbounded variogram (gamma/sill 3.38 -> 3.28): that is
+    heteroscedasticity, not missing trend. See PRIOR_MEAN.md.
+
+    ``size=None`` reproduces the plain linear mean exactly, which is what every ladder
+    rung before 2026-07-28 used.
     """
 
     coef_: np.ndarray = field(default=None, repr=False)   # (d,)
     intercept_: float = 0.0
+    uses_size_: bool = False
+    size_mu_: np.ndarray = field(default=None, repr=False)
+    size_sd_: np.ndarray = field(default=None, repr=False)
 
-    def fit(self, Z, y):
+    @staticmethod
+    def _size_block(size):
+        n = np.asarray(size, dtype=float).reshape(-1, 1)
+        if np.any(n <= 0):
+            raise ValueError("molecule sizes must be positive (log/sqrt terms)")
+        return np.hstack([n, np.log(n), np.sqrt(n), n ** 3])
+
+    def _design(self, Z, size):
         Z = np.asarray(Z, dtype=float)
+        blocks = [np.ones((len(Z), 1)), Z]
+        if size is not None:
+            # standardised for conditioning only: n^3 reaches ~4e7 while the embedding is
+            # O(1), and OLS is invariant to an invertible linear reparameterisation of
+            # the design, so this changes the arithmetic and not the fit.
+            S = (self._size_block(size) - self.size_mu_) / self.size_sd_
+            blocks += [S, Z * np.log(np.asarray(size, dtype=float)).reshape(-1, 1)]
+        return np.hstack(blocks)
+
+    def fit(self, Z, y, size=None):
         y = np.asarray(y, dtype=float).ravel()
-        H = np.hstack([np.ones((len(Z), 1)), Z])
+        self.uses_size_ = size is not None
+        if self.uses_size_:
+            S = self._size_block(size)
+            self.size_mu_ = S.mean(axis=0)
+            self.size_sd_ = np.where(S.std(axis=0) > 0, S.std(axis=0), 1.0)
+        H = self._design(Z, size)
         beta, *_ = np.linalg.lstsq(H, y, rcond=None)
         self.intercept_, self.coef_ = float(beta[0]), beta[1:]
         return self
 
-    def predict(self, Z):
-        return self.intercept_ + np.asarray(Z, dtype=float) @ self.coef_
+    def predict(self, Z, size=None):
+        if self.uses_size_ and size is None:
+            raise ValueError(
+                "this mean was fitted with a size interaction; predict() needs the same "
+                "per-molecule sizes. Passing none would silently drop the term that is "
+                "worth +0.10 R^2.")
+        if size is not None and not self.uses_size_:
+            size = None                      # fitted without it; ignore rather than break
+        H = self._design(Z, size)
+        return H @ np.concatenate([[self.intercept_], self.coef_])

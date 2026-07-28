@@ -111,7 +111,7 @@ def _measure_nugget(chan, y_tr, cat_tr, eps_frac=0.05, min_pairs=30,
 
 
 def _gp_r2_channels(chan, y_tr, cat_tr, y_te, cat_te, client, args, mean_chan=None,
-                    jitter=None):
+                    jitter=None, size_tr=None, size_te=None):
     """Build a frozen (or --train'd) additive gp2Scale GP over the given channels and
     return held-out R^2. ``chan`` is a list of {"Ztr","Zte","cutoff"} dicts; the kernel
     sums one Wendland block per channel on its own column range/cutoff.
@@ -139,8 +139,16 @@ def _gp_r2_channels(chan, y_tr, cat_tr, y_te, cat_te, client, args, mean_chan=No
         mc = mean_chan if mean_chan is not None else chan
         Mtr = np.hstack([c["Ztr"] for c in mc])
         Mte = np.hstack([c["Zte"] for c in mc])
-        mean = LinearEmbeddingMean().fit(Mtr, y_tr)
-        y_fit = y_tr - mean.predict(Mtr)              # GP models the residual
+        # size interaction is worth +0.10 held-out R^2 -- see reduce.LinearEmbeddingMean
+        # and PRIOR_MEAN.md. Requires per-molecule atom counts, so it silently degrades
+        # to the plain linear mean if the caller did not supply them; say so rather than
+        # let a missing argument quietly cost more than the entire kernel.
+        use_size = getattr(args, "mean_size_interaction", True) and size_tr is not None
+        if getattr(args, "mean_size_interaction", True) and size_tr is None:
+            print("[sweep]   WARNING: --mean-size-interaction is on but no atom counts "
+                  "were passed; falling back to the plain linear mean (-0.10 R^2).")
+        mean = LinearEmbeddingMean().fit(Mtr, y_tr, size=(size_tr if use_size else None))
+        y_fit = y_tr - mean.predict(Mtr, size=(size_tr if use_size else None))
     else:
         mean, y_fit, Mte = None, y_tr, None
 
@@ -183,18 +191,25 @@ def _gp_r2_channels(chan, y_tr, cat_tr, y_te, cat_te, client, args, mean_chan=No
     print(f"[sweep]   build(+solve){'+train' if args.train else ''}={t_build:.1f}s")
     m, _ = predict(gp, Xte, batch=args.pred_batch, variance=False)
     if mean is not None:
-        m = m + mean.predict(Mte)                     # add the linear mean back
+        m = m + mean.predict(Mte, size=(size_te if mean.uses_size_ else None))
     r2 = float(r2_score(y_te, m))
     del gp
     release_gp(client)
     return r2
 
 
-def _ols_r2(chan, y_tr, y_te):
-    """Cross-check: held-out OLS R^2 on the concatenated embedding (cutoff-free)."""
+def _ols_r2(chan, y_tr, y_te, size_tr=None, size_te=None):
+    """Cross-check: held-out R^2 of the PRIOR MEAN alone on the concatenated embedding
+    (cutoff-free). Must use the SAME mean model the GP is given, or GP_R2 - OLS_R2 stops
+    being the kernel's contribution and silently becomes "kernel + whatever the two mean
+    models differ by"."""
     Ztr = np.hstack([c["Ztr"] for c in chan])
     Zte = np.hstack([c["Zte"] for c in chan])
-    return regression_r2(Ztr, y_tr, Zte, y_te)
+    if size_tr is None:
+        return regression_r2(Ztr, y_tr, Zte, y_te)
+    from sklearn.metrics import r2_score
+    m = LinearEmbeddingMean().fit(Ztr, y_tr, size=size_tr)
+    return float(r2_score(y_te, m.predict(Zte, size=size_te)))
 
 
 def _restrict(ds, args):
@@ -265,6 +280,9 @@ def run(args, client):
         atoms_te = [ds.atoms[i] for i in te]
         y_tr, y_te = ds.y[tr], ds.y[te]
         cat_tr, cat_te = ds.data_id[tr], ds.data_id[te]
+        # atom counts for the prior mean's size interaction (+0.10 R^2, PRIOR_MEAN.md)
+        size_tr = np.array([len(a) for a in atoms_tr], dtype=float)
+        size_te = np.array([len(a) for a in atoms_te], dtype=float)
 
         # channel name -> {"Ztr","Zte","cutoff"}. Shared with wl_gp2scale.train_mcmc:
         # the learned-radius result is compared against THIS sweep's neighbour-count
@@ -287,7 +305,9 @@ def run(args, client):
             for c in chan:
                 sparsity_report(c["Ztr"], c["cutoff"], dim=c["Ztr"].shape[1],
                                 data_id=cat_tr, sample=args.diag_sample)
-            ols = _ols_r2(mean_chan if mean_chan else chan, y_tr, y_te)
+            ols = _ols_r2(mean_chan if mean_chan else chan, y_tr, y_te,
+                          size_tr=(size_tr if args.mean_size_interaction else None),
+                          size_te=(size_te if args.mean_size_interaction else None))
             # measured PER MODE: the additive kernel's duplicate structure is not the
             # same as any single channel's, so one global nugget would be wrong
             jit = args.jitter
@@ -311,7 +331,8 @@ def run(args, client):
                     print(f"[sweep] --- seed={seed} mode={mode} jitter={jv:g} "
                           f"(embeddings reused) ---")
                 gp_r2 = _gp_r2_channels(chan, y_tr, cat_tr, y_te, cat_te, client, args,
-                                        mean_chan=mean_chan, jitter=jv)
+                                        mean_chan=mean_chan, jitter=jv,
+                                        size_tr=size_tr, size_te=size_te)
                 print(f"[sweep] seed={seed} mode={mode:>8}  cutoffs={cuts}  "
                       f"jitter={jv:.4g}  OLS_R2={ols:.4f}  GP_R2={gp_r2:.4f}{extra}")
                 # rows and nuggets stay INDEX-ALIGNED (one entry each per solve), which
@@ -378,6 +399,12 @@ def main():
                          "whether a channel's effect is additive-and-global (mean is "
                          "enough) or local (needs a kernel block): e.g. "
                          "--channels wl geom additive --mean-channels wl geom strain")
+    ap.add_argument("--no-mean-size-interaction", dest="mean_size_interaction",
+                    action="store_false",
+                    help="drop the size x embedding term from the linear prior mean. "
+                         "That term is worth +0.103 held-out R^2 at 20k -- about 4x the "
+                         "entire kernel -- so this exists only to reproduce rungs "
+                         "measured before 2026-07-28, which all used the plain mean.")
     ap.add_argument("--target-neighbors", type=int, default=60,
                     help="per-channel cutoff tuned to this median in-support neighbour "
                          "count (0 -> fall back to --cutoff-pct)")
