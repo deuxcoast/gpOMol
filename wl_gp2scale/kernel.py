@@ -396,7 +396,7 @@ def dense_wendland_reference(x1, x2, hps, cutoff, dim=None, metric="euclidean"):
 
 
 def check_kernel_diagonal(kernel_fn: Callable, X_sample, signal_var: float,
-                          tol: float = 1e-10) -> dict:
+                          tol: float = 1e-10, hps=None) -> dict:
     """The Wendland diagonal must be EXACTLY signal_var: psi(0)=1 and the distance
     from a point to itself is exactly 0.
 
@@ -404,8 +404,28 @@ def check_kernel_diagonal(kernel_fn: Callable, X_sample, signal_var: float,
     distances -- which is precisely what torch.cdist's default mm expansion does
     (3e-5 in float32, 9e-10 in float64). On this near-singular Gram (cond ~1e9) that
     silently corrupts the solve rather than erroring. Regression guard for the
-    compute_mode / dtype fix; run it whenever the kernel's numerics change."""
-    K = kernel_fn(X_sample, X_sample, np.asarray([signal_var], dtype=float))
+    compute_mode / dtype fix; run it whenever the kernel's numerics change.
+
+    This builds a ONE-ELEMENT ``hps`` and so only makes sense for a single-block
+    kernel; pass ``hps=`` explicitly to override. The guards below exist because both
+    failure modes against an additive kernel are unhelpful: C>=2 raises a bare
+    IndexError from inside ``__call__``, and C==1 with ``cutoffs_are_hp=True`` silently
+    falls back to the frozen ChannelSpec radius (kernel.py: ``len(hps) > C + c`` is
+    False), so the check would pass while testing the wrong kernel."""
+    n_ch = len(getattr(kernel_fn, "channels", None) or [])
+    if hps is None and n_ch > 1:
+        raise ValueError(
+            f"check_kernel_diagonal builds a 1-element hps, but this kernel has "
+            f"{n_ch} channels and reads hps[0:{n_ch}]. Use "
+            f"validate.additive_kernel_guard (its case (c) checks diag == sum_c sv_c), "
+            f"or pass hps= explicitly.")
+    if hps is None and n_ch == 1 and getattr(kernel_fn, "cutoffs_are_hp", False):
+        raise ValueError(
+            "this kernel has cutoffs_are_hp=True and so needs hps of length 2 "
+            "[signal_var, radius]; a 1-element hps would silently fall back to the "
+            "frozen ChannelSpec.cutoff and test the wrong configuration. Pass hps=.")
+    hps = np.asarray([signal_var] if hps is None else hps, dtype=float)
+    K = kernel_fn(X_sample, X_sample, hps)
     if sp.issparse(K):
         K = K.toarray()
     d = np.diag(np.asarray(K, dtype=float))

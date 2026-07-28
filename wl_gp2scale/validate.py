@@ -34,7 +34,7 @@ from .reduce import SparsePLS, batch_pls_r2, regression_r2
 
 def sparse_vs_dense_parity(
     Z_tr, y_tr, Z_te, cutoff, client, y_te=None, jitter=1e-6, tol=1e-3, device="cpu",
-    linalg_mode="sparseCG",
+    linalg_mode="sparseCG", solve_maxiter=None, solve_tol=None,
 ):
     """Compare gp2Scale/sparseCG posterior mean vs the dense scipy.cdist Wendland
     GP on the SAME embedding. Returns a dict with max abs diff and correlation.
@@ -79,7 +79,7 @@ def sparse_vs_dense_parity(
     gp_sparse, _ = build_gp(
         Xtr, y_tr, cutoff, dim, client, signal_var=sv, jitter=jitter,
         batch_size=10_000, compute_device="cpu", device=device,
-        linalg_mode=linalg_mode,
+        linalg_mode=linalg_mode, solve_maxiter=solve_maxiter, solve_tol=solve_tol,
     )
     m_sparse, _ = predict(gp_sparse, Xte)
 
@@ -183,7 +183,10 @@ def additive_kernel_guard(Z_sample, cutoff, cat_sample=None, tol=1e-10):
       (b) a TWO-channel additive kernel equals the sum of two dense Wendland references
           (different per-channel cutoffs), masked by category;
       (c) the diagonal is exactly sum_c sv_c;
-      (d) cross-category pairs are zeroed."""
+      (d) cross-category pairs are zeroed;
+      (e) with ``cutoffs_are_hp=True``, ``hps[C+c]`` and ``ChannelSpec.cutoff`` are the
+          SAME knob -- byte-exactly, across scale factors -- and the realised nnz is
+          strictly monotone in the radius."""
     from .kernel import (AdditiveWendlandKernel, ChannelSpec, WLBlockKernel,
                          dense_wendland_reference)
 
@@ -220,15 +223,41 @@ def additive_kernel_guard(Z_sample, cutoff, cat_sample=None, tol=1e-10):
     i, j = np.where(cat[:, None] != cat[None, :])
     d_ok = (i.size == 0) or bool(np.allclose(K2[i, j], 0.0))
 
-    ok = a_ok and b_ok and c_ok and d_ok
+    # (e) the trainable radius IS the frozen radius.
+    # This is the core correctness check for `cutoffs_are_hp`: a kernel built with the
+    # flag and handed hps[C+c] = r must produce EXACTLY what a kernel built with
+    # ChannelSpec.cutoff = r produces. Byte equality (not a tolerance) is the right bar
+    # -- both paths run identical arithmetic and differ only in where the number came
+    # from, so any discrepancy is a wiring bug rather than numerical drift. The monotone
+    # nnz assertion is the half that actually answers "does the hyperparameter move the
+    # SPARSITY", which is what makes a trainable radius meaningful at all.
+    add2_hp = AdditiveWendlandKernel(
+        channels=[ChannelSpec(0, d0, cutoff), ChannelSpec(d0, D, c1)],
+        cutoffs_are_hp=True, device="cpu")
+    e_exact, e_nnz = True, []
+    for s in (0.5, 1.0, 2.0):
+        ref_s = AdditiveWendlandKernel(
+            channels=[ChannelSpec(0, d0, cutoff * s), ChannelSpec(d0, D, c1 * s)],
+            device="cpu")
+        Kt = add2_hp(x, x, np.array([sv0, sv1, cutoff * s, c1 * s]))
+        e_exact &= bool(np.array_equal(np.asarray(Kt), np.asarray(ref_s(x, x, np.array([sv0, sv1])))))
+        e_nnz.append(int(np.count_nonzero(np.asarray(Kt))))
+    e_mono = e_nnz[0] < e_nnz[1] < e_nnz[2]
+    # and the flag must GATE it: frozen kernels ignore any trailing hps
+    e_gated = bool(np.array_equal(
+        np.asarray(K2), np.asarray(add2(x, x, np.array([sv0, sv1, 4 * cutoff, 4 * c1])))))
+    e_ok = e_exact and e_mono and e_gated
+
+    ok = a_ok and b_ok and c_ok and d_ok and e_ok
     print(
         f"[val] additive kernel: (a) ==WLBlock diff={a_diff:.1e} {'ok' if a_ok else 'FAIL'} | "
         f"(b) ==sum-dense diff={b_diff:.1e} {'ok' if b_ok else 'FAIL'} | "
-        f"(c) diag {'ok' if c_ok else 'FAIL'} | (d) cat-mask {'ok' if d_ok else 'FAIL'} "
-        f"-> {'PASS' if ok else 'FAIL'}"
+        f"(c) diag {'ok' if c_ok else 'FAIL'} | (d) cat-mask {'ok' if d_ok else 'FAIL'} | "
+        f"(e) hps-radius exact={e_exact} nnz={e_nnz} mono={e_mono} gated={e_gated} "
+        f"{'ok' if e_ok else 'FAIL'} -> {'PASS' if ok else 'FAIL'}"
     )
     return {"a_wlblock": a_ok, "b_sum_dense": b_ok, "c_diag": c_ok,
-            "d_catmask": d_ok, "pass": ok}
+            "d_catmask": d_ok, "e_hps_radius": e_ok, "e_nnz": e_nnz, "pass": ok}
 
 
 # ----------------------------- CLI driver ----------------------------------

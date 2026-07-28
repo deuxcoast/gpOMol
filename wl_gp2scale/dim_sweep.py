@@ -27,34 +27,20 @@ import time
 
 import numpy as np
 
-from .cutoff import cutoff_for_neighbors, recalibrate, sparsity_report
-from .pipeline import (GeometryPipeline, WLGPPipeline, build_gp, predict,
-                       release_gp, sort_by_category, train_hyperparameters,
-                       with_category_tag)
+from .cutoff import sparsity_report
+from .pipeline import (build_channels, build_gp, predict, release_gp,
+                       sort_by_category, train_hyperparameters, with_category_tag)
 from .reduce import LinearEmbeddingMean, regression_r2
 
 # numeric tag for the --out rows. "additive" is not a channel: it is the SUM of every
 # single channel requested in the same run.
 CHANNEL_CODE = {"wl": 0, "geom": 1, "strain": 2, "elec": 3, "additive": 4}
 SINGLE = ("wl", "geom", "strain", "elec")
-# geometry-derived channels and the geometry sub-channels each is built from. "geom"
-# takes whatever --geom-channels says; the others are single sub-channels promoted to
-# first-class channels so they can be given their own embedding, their own length scale,
-# or routed to the prior mean instead of the kernel.
-GEOM_MODES = {"geom": None, "strain": ("strain",), "elec": ("elec",)}
-
-
-def _channel_cutoff(Z_tr, Z_te, cat_tr, cat_te, args):
-    """Per-channel compact-support radius: tuned to ~--target-neighbors (default), else
-    the --cutoff-pct percentile of this channel's own pairwise distances."""
-    if args.target_neighbors:
-        return cutoff_for_neighbors(
-            Z_tr, Z_te, args.target_neighbors, dim=Z_tr.shape[1],
-            data_id_tr=cat_tr, data_id_te=cat_te, sample=args.diag_sample,
-        )
-    c, _ = recalibrate(Z_tr, percentile=args.cutoff_pct, dim=Z_tr.shape[1],
-                       sample=args.diag_sample)
-    return c
+# The geometry sub-channel map and the per-channel cutoff policy used to live here as
+# GEOM_MODES / _channel_cutoff. Both moved into pipeline.build_channels so this sweep and
+# wl_gp2scale.train_mcmc build embeddings through one code path -- the learned-radius
+# result is compared against this sweep's neighbour-count grid, and a second copy of the
+# cutoff policy is exactly how such a comparison silently stops being paired.
 
 
 def _measure_nugget(chan, y_tr, cat_tr, eps_frac=0.05, min_pairs=30,
@@ -280,37 +266,19 @@ def run(args, client):
         y_tr, y_te = ds.y[tr], ds.y[te]
         cat_tr, cat_te = ds.data_id[tr], ds.data_id[te]
 
-        emb = {}   # channel name -> {"Ztr","Zte","cutoff"}
-        if "wl" in need:
-            pw = WLGPPipeline(depth=args.depth, min_count=args.min_count,
-                              pls_components=args.pls, cutoff_percentile=None,
-                              scaling=args.scaling, vocab_sample=0,
-                              cutoff_mult=args.bond_mult,
-                              perceiver=(args.wl_perceiver or args.perceiver))
-            Zw_tr = pw.fit(atoms_tr, y_tr, cat_tr, client=client)
-            Zw_te = pw.transform(atoms_te, client=client)
-            emb["wl"] = {"Ztr": Zw_tr, "Zte": Zw_te,
-                         "cutoff": _channel_cutoff(Zw_tr, Zw_te, cat_tr, cat_te, args)}
-        # geom and strain are SEPARATE channels on purpose. Their features are not
-        # commensurable -- the histogram channels are O(1) per-atom frequencies while
-        # strain is a sum of squared deviations -- and pareto scaling preserves scale by
-        # design, so folding strain into the geometry PLS lets it dominate the embedding
-        # (measured: geom GP R^2 0.317 -> 0.064, cutoff 2.4 -> 180). Own embedding, own
-        # length scale: exactly what the additive kernel exists for.
-        for name, sub in GEOM_MODES.items():
-            if name not in need:
-                continue
-            chans = tuple(args.geom_channels) if sub is None else sub
-            pg = GeometryPipeline(top_k=args.geom_top_k, channels=chans,
-                                  r_max=args.geom_r_max, pls_components=args.pls,
-                                  cutoff_percentile=None, scaling=args.scaling,
-                                  charge_key=args.charge_key,
-                                  cutoff_mult=args.bond_mult,
-                                  perceiver=args.perceiver)
-            Z_tr = pg.fit(atoms_tr, y_tr, cat_tr, client=client)
-            Z_te = pg.transform(atoms_te, client=client)
-            emb[name] = {"Ztr": Z_tr, "Zte": Z_te,
-                         "cutoff": _channel_cutoff(Z_tr, Z_te, cat_tr, cat_te, args)}
+        # channel name -> {"Ztr","Zte","cutoff"}. Shared with wl_gp2scale.train_mcmc:
+        # the learned-radius result is compared against THIS sweep's neighbour-count
+        # grid, and that comparison is only paired if both build the same embedding.
+        emb = build_channels(
+            atoms_tr, y_tr, cat_tr, atoms_te, cat_te, need, client=client,
+            pls=args.pls, scaling=args.scaling, depth=args.depth,
+            min_count=args.min_count, bond_mult=args.bond_mult,
+            perceiver=args.perceiver, wl_perceiver=args.wl_perceiver,
+            geom_channels=tuple(args.geom_channels), geom_top_k=args.geom_top_k,
+            geom_r_max=args.geom_r_max, charge_key=args.charge_key,
+            target_neighbors=args.target_neighbors, cutoff_pct=args.cutoff_pct,
+            diag_sample=args.diag_sample,
+        )
 
         mean_chan = ([emb[m] for m in args.mean_channels]
                      if args.mean_channels else None)
