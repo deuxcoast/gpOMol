@@ -305,6 +305,10 @@ class LinearEmbeddingMean:
     uses_size_: bool = False
     size_mu_: np.ndarray = field(default=None, repr=False)
     size_sd_: np.ndarray = field(default=None, repr=False)
+    sigma2_: float = 0.0                                       # RSS / (n - p)
+    HtH_pinv_: np.ndarray = field(default=None, repr=False)    # for predict_var
+    n_fit_: int = 0
+    p_fit_: int = 0
 
     @staticmethod
     def _size_block(size):
@@ -334,7 +338,46 @@ class LinearEmbeddingMean:
         H = self._design(Z, size)
         beta, *_ = np.linalg.lstsq(H, y, rcond=None)
         self.intercept_, self.coef_ = float(beta[0]), beta[1:]
+        # State for predict_var. pinv, not inv: the M6-style designs are wide (374
+        # columns) and can be rank-deficient where a category is thinly sampled.
+        n, p = H.shape
+        resid = y - H @ beta
+        self.sigma2_ = float(resid @ resid / max(n - p, 1))
+        self.HtH_pinv_ = np.linalg.pinv(H.T @ H)
+        self.n_fit_, self.p_fit_ = int(n), int(p)
         return self
+
+    def predict_var(self, Z, size=None):
+        """Predictive variance of the FITTED MEAN at new points -- the parameter
+        uncertainty we currently throw away.
+
+        We detrend manually: fit m(z), hand the GP ``y - m(z)``, add ``m(z*)`` back. So
+        the GP's posterior variance describes the RESIDUAL only, and the total predictive
+        uncertainty is understated by whatever this returns. Under an M6-style mean that
+        is ~374 fitted coefficients' worth of uncertainty being silently dropped.
+
+        Returns ``sigma_hat^2 * h(x*)^T (H^T H)^+ h(x*)``, the ORDINARY least-squares
+        parameter variance.
+
+        BE PRECISE ABOUT WHAT THIS IS NOT. It is not the exact correction. OLS parameter
+        covariance assumes independent residuals, and the residuals here are correlated
+        -- that correlation is the entire reason a GP is bolted on afterwards. The exact
+        treatment is universal kriging, which replaces ``(H^T H)^+`` with
+        ``(H^T KV^-1 H)^-1`` and adds a cross term in ``h* - H^T KV^-1 k*``; that costs p
+        extra linear solves (374 under M6) on top of the one-per-test-point the variance
+        already needs. Whether that is worth building depends on how large this term is
+        relative to the GP's own variance -- measure before deciding.
+
+        So: a strict improvement over ignoring the mean entirely, and a lower bound on
+        the correction rather than the correction itself.
+        """
+        if self.HtH_pinv_ is None:
+            raise RuntimeError("fit() first")
+        if self.uses_size_ and size is None:
+            raise ValueError("this mean was fitted with a size interaction; "
+                             "predict_var() needs the same per-molecule sizes")
+        H = self._design(Z, None if not self.uses_size_ else size)
+        return self.sigma2_ * np.einsum("ij,ij->i", H @ self.HtH_pinv_, H)
 
     def predict(self, Z, size=None):
         if self.uses_size_ and size is None:
