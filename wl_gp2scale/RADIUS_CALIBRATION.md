@@ -218,7 +218,55 @@ That is the one place this result points forward rather than back, and it is the
 lever the notes already flagged as untested: the gp2Scale methods paper's §4.2
 *length-scale* non-stationarity ρ(x), of which **a per-category radius is the cheap
 discrete version**. Everything needed to try it exists — `build_gp` already takes
-per-channel `(start, stop, cutoff)` specs.
+per-channel `(start, stop, cutoff)` specs, and because the Gram is *already* exactly
+block-diagonal by category (`kernel.py:242` zeroes cross-category pairs unconditionally),
+per-category radii are automatically PSD: a block-diagonal matrix whose blocks are each
+PSD is PSD. No Paciorek–Schervish machinery is needed for the discrete version.
+
+### But NOT as a route to discovering sparsity — that was tested and failed
+
+*Scripts: `scripts/remark1_local_scaling/`.* It is tempting to read the per-category scale
+spread as evidence that a non-stationary length scale could make the position paper's §3
+block sparsity *emerge* — that families overlap only because family A is tight and B
+diffuse (per-family 10-NN distance spans 2.3×), so a cross pair can be closer than a
+typical within-B pair purely from scale mismatch. That is a testable claim and it is
+**false**.
+
+Re-running Remark 1 on locally-scaled distances — `d̃ᵢⱼ = dᵢⱼ/√(σᵢσⱼ)` with σᵢ the distance
+to i's k-th nearest neighbour, computed **ignoring `data_id`** so the test measures
+discovery rather than imposition — on `wl+geom`, mean over the three seeds:
+
+| scaling | separation ratio | P(cross < within median) | k=5 purity | k=50 purity | modality probe |
+|---|---|---|---|---|---|
+| stationary | 1.225 | 0.291 | 0.710 | 0.616 | 0.000 |
+| local σ, k=10 | 1.279 | 0.231 | 0.714 | 0.618 | 0.000 |
+| local σ, k=50 | 1.263 | 0.224 | 0.717 | 0.625 | 0.000 |
+| **pre-registered gate** | **≥ 1.50** | **≤ 0.20** | | | |
+
+Everything moves the right way in all three seeds and both geometry channels, so the
+effect is real — and far too small, covering ~20% of the distance to the gate.
+
+**The internal control is what makes it decisive: the normalisation worked.** The
+per-family scale spread it targets collapsed from **2.3× to 1.7×**. The confound was
+removed and the families still did not separate, so the overlap is **genuine
+interpenetration, not scale mismatch**.
+
+Three details harden it: the decision-relevant number barely moves (k=5 neighbour purity
+0.710 → 0.714 — a compact-support kernel's neighbour *sets* are unchanged, and the ratio
+gains are happening in tails the kernel never reaches); Remark 1's own modality probe
+stays at 0.000 under every σ, so no near-zero mode appears; and on the WL channel alone
+local scaling makes separation *worse* (1.220 → 1.161).
+
+**Conclusion.** ρ(x) cannot make §3's block structure emerge from this descriptor — and
+since cross-category covariance is already exactly zero, there is nothing left for it to
+discover at the family level anyway. A per-category radius remains worth trying as
+**tuning**, and should be reported as such; the paper's discovery claim is not available
+to it.
+
+*(Incidental, and consistent with the historical CG conditioning trouble: the WL channel
+contains exact duplicates — 78 of 4000 sampled points have a co-located neighbour and one
+cluster has 14 identical embeddings — which is why σᵢ is undefined there for k ≤ 10. The
+geometry channel has none.)*
 
 ---
 
