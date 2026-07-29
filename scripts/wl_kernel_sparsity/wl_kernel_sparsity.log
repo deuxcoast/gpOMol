@@ -1,0 +1,48 @@
+[data] loaded materialised cache cache/materialized_20000.pkl (20,000 molecules) -- skipped 20,000 random lmdb lookups
+n=4000 molecules, chance same-category = 0.1691
+
+============================================================================================
+min_count = 1   (no pruning, closest to Eq. 7)
+============================================================================================
+[wl-fit] 86176 raw labels -> 86176 kept (min_count=1) from 4000 sample mols in 4.8s; per-depth {1: 5897, 2: 27836, 3: 52443}
+[wl] transformed (4000, 86176) (nnz=248,298, density=7.20e-04) in 4.9s; OOV 0.0% of occurrences
+
+  kernel                     frac_zero zero|within zero|across    purity    density
+                             (sparsity)                         (chance 0.169)
+  ----------------------------------------------------------------------------------------
+  depth 0 alone  (V=80)         0.0029      0.0027      0.0029    0.1691   9.97e-01
+                               ^ Eq. 7 starts its sum HERE
+  depth 1 alone  (V=5,897)      0.0594      0.0604      0.0592    0.1689   9.41e-01
+  depth 2 alone  (V=27,836)     0.4125      0.3394      0.4274    0.1901   5.88e-01
+  depth 3 alone  (V=52,443)     0.8250      0.6694      0.8567    0.3195   1.75e-01
+  SUM d=1..3  (our phi)         0.0594      0.0604      0.0592    0.1689   9.41e-01
+  SUM d=0..3  (Eq. 7)           0.0029      0.0027      0.0029    0.1691   9.97e-01
+
+  per-molecule nonzero patterns, by depth: {0: 4, 1: 12, 2: 17, 3: 20}
+
+============================================================================================
+min_count = 2   (production)
+============================================================================================
+[wl-fit] 86176 raw labels -> 12435 kept (min_count=2) from 4000 sample mols in 4.8s; per-depth {1: 1812, 2: 4429, 3: 6194}
+[wl] transformed (4000, 12435) (nnz=174,557, density=3.51e-03) in 4.8s; OOV 14.0% of occurrences
+
+  kernel                     frac_zero zero|within zero|across    purity    density
+                             (sparsity)                         (chance 0.169)
+  ----------------------------------------------------------------------------------------
+  depth 0 alone  (V=80)         0.0029      0.0027      0.0029    0.1691   9.97e-01
+                               ^ Eq. 7 starts its sum HERE
+  depth 1 alone  (V=1,812)      0.0594      0.0604      0.0592    0.1689   9.41e-01
+  depth 2 alone  (V=4,429)      0.4125      0.3394      0.4274    0.1901   5.88e-01
+  depth 3 alone  (V=6,194)      0.8250      0.6694      0.8567    0.3195   1.75e-01
+  SUM d=1..3  (our phi)         0.0594      0.0604      0.0592    0.1689   9.41e-01
+  SUM d=0..3  (Eq. 7)           0.0029      0.0027      0.0029    0.1691   9.97e-01
+
+  per-molecule nonzero patterns, by depth: {0: 4, 1: 11, 2: 12, 3: 10}
+
+============================================================================================
+READ: frac_zero is the sparsity gp2Scale would get FOR FREE -- no radius, no
+hyperparameter, PSD by construction. Compare with our PLS route, where the
+10-dim continuous embedding admits NO exact zeros and the radius has to
+manufacture them. purity >> chance means the surviving pairs are chemically
+alike, i.e. the sparsity is BLOCK sparsity reflecting chemistry -- the
+position paper's sec-3 success mode.

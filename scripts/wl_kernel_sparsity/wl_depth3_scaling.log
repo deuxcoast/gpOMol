@@ -1,0 +1,33 @@
+[data] loaded materialised cache cache/materialized_20000.pkl (20,000 molecules) -- skipped 20,000 random lmdb lookups
+      N   V(depth3)  pat/mol  frac_zero    density   purity   chance   lift
+------------------------------------------------------------------------------
+[wl-fit] 27476 raw labels -> 27476 kept (min_count=1) from 1000 sample mols in 1.2s; per-depth {1: 2361, 2: 9092, 3: 16023}
+[wl] transformed (1000, 27476) (nnz=64,523, density=2.35e-03) in 1.2s; OOV 0.0% of occurrences
+   1000      16,023       22     0.8087  1.913e-01   0.3151   0.1713   1.84x
+[wl-fit] 48019 raw labels -> 48019 kept (min_count=1) from 2000 sample mols in 2.3s; per-depth {1: 3701, 2: 15751, 3: 28567}
+[wl] transformed (2000, 48019) (nnz=123,876, density=1.29e-03) in 2.4s; OOV 0.0% of occurrences
+   2000      28,567       20     0.8246  1.754e-01   0.3199   0.1711   1.87x
+[wl-fit] 87369 raw labels -> 87369 kept (min_count=1) from 4000 sample mols in 4.8s; per-depth {1: 6054, 2: 28319, 3: 52996}
+[wl] transformed (4000, 87369) (nnz=250,262, density=7.16e-04) in 4.8s; OOV 0.0% of occurrences
+   4000      52,996       20     0.8194  1.806e-01   0.3248   0.1717   1.89x
+[wl-fit]   vocab scan 5000/8000
+[wl-fit] 157845 raw labels -> 157845 kept (min_count=1) from 8000 sample mols in 9.5s; per-depth {1: 9654, 2: 50653, 3: 97538}
+[wl] transformed (8000, 157845) (nnz=496,921, density=3.94e-04) in 9.6s; OOV 0.0% of occurrences
+   8000      97,538       19     0.8226  1.774e-01   0.3180   0.1695   1.88x
+[wl-fit]   vocab scan 5000/16000
+[wl-fit]   vocab scan 10000/16000
+[wl-fit]   vocab scan 15000/16000
+[wl-fit] 286034 raw labels -> 286034 kept (min_count=1) from 16000 sample mols in 19.6s; per-depth {1: 15330, 2: 90429, 3: 180275}
+[wl] transformed (16000, 286034) (nnz=998,034, density=2.18e-04) in 19.4s; OOV 0.0% of occurrences
+  16000     180,275       20     0.8213  1.787e-01   0.3183   0.1684   1.89x
+
+  density ~ 0.21 * N^-0.018   (R^2 of log-log fit 0.3362)
+    extrapolated density at N=   20,000: 1.754e-01   nnz=7.02e+07   (denser than our K=200 radius kernel at 2.34e-02)
+    extrapolated density at N=  200,000: 1.683e-01   nnz=6.73e+09   (denser than our K=200 radius kernel at 2.34e-02)
+    extrapolated density at N=1,000,000: 1.635e-01   nnz=1.64e+11   (denser than our K=200 radius kernel at 2.34e-02)
+
+  purity across the ladder: [0.3151 0.3199 0.3248 0.318  0.3183]  (rising)
+
+  CAVEAT: extrapolating a power law two decades past the data is a
+  hypothesis, not a measurement. It is cheap to check directly at 200k --
+  featurisation only, no GP, no solve.

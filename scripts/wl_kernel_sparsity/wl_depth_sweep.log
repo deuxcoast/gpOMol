@@ -1,0 +1,24 @@
+[data] loaded materialised cache cache/materialized_20000.pkl (20,000 molecules) -- skipped 20,000 random lmdb lookups
+n=4000, chance same-category=0.1691, our radius kernel density at K=200 is 2.34e-02
+
+ depth h       V(h)  pat/mol  frac_zero    density   purity   lift  isolated  med deg
+--------------------------------------------------------------------------------------------
+[wl-fit] 33733 raw labels -> 33733 kept (min_count=1) from 4000 sample mols in 4.6s; per-depth {1: 5897, 2: 27836}
+[wl] transformed (4000, 33733) (nnz=141,709, density=1.05e-03) in 4.6s; OOV 0.0% of occurrences
+       2     27,836       17     0.4125  5.875e-01   0.1901   1.12x      0.8%     2693
+[wl-fit] 86176 raw labels -> 86176 kept (min_count=1) from 4000 sample mols in 4.8s; per-depth {1: 5897, 2: 27836, 3: 52443}
+[wl] transformed (4000, 86176) (nnz=248,298, density=7.20e-04) in 4.8s; OOV 0.0% of occurrences
+       3     52,443       20     0.8250  1.750e-01   0.3195   1.89x      6.2%      519
+[wl-fit] 157909 raw labels -> 157909 kept (min_count=1) from 4000 sample mols in 5.0s; per-depth {1: 5897, 2: 27836, 3: 52443, 4: 71733}
+[wl] transformed (4000, 157909) (nnz=363,492, density=5.75e-04) in 5.1s; OOV 0.0% of occurrences
+       4     71,733       20     0.9424  5.758e-02   0.4786   2.83x     20.1%       60
+[wl-fit] 240331 raw labels -> 240331 kept (min_count=1) from 4000 sample mols in 5.2s; per-depth {1: 5897, 2: 27836, 3: 52443, 4: 71733, 5: 82422}
+[wl] transformed (4000, 240331) (nnz=482,823, density=5.02e-04) in 5.3s; OOV 0.0% of occurrences
+       5     82,422       20     0.9748  2.525e-02   0.6588   3.90x     32.4%       13
+[wl-fit] 328770 raw labels -> 328770 kept (min_count=1) from 4000 sample mols in 5.5s; per-depth {1: 5897, 2: 27836, 3: 52443, 4: 71733, 5: 82422, 6: 88439}
+[wl] transformed (4000, 328770) (nnz=604,652, density=4.60e-04) in 6.0s; OOV 0.0% of occurrences
+       6     88,439       20     0.9823  1.767e-02   0.7610   4.50x     42.1%        2
+
+  A usable kernel needs frac_zero high AND purity high AND isolated low.
+  If sparsity only arrives by isolating molecules, every isolated point
+  reverts to the prior mean and the kernel has bought nothing.
