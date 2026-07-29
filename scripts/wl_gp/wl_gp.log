@@ -1,0 +1,46 @@
+[data] loaded materialised cache cache/materialized_20000.pkl (20,000 molecules) -- skipped 20,000 random lmdb lookups
+[ref] radius kernel K=200: R2=0.8079  rho(sigma*,|err|)=+0.2088  | dist-to-NN rho=+0.2995
+
+[wl-fit]   vocab scan 5000/16000
+[wl-fit]   vocab scan 10000/16000
+[wl-fit]   vocab scan 15000/16000
+[wl-fit] 544093 raw labels -> 544093 kept (min_count=1) from 16000 sample mols in 20.8s; per-depth {1: 15330, 2: 90429, 3: 180275, 4: 258059}
+[wl] transformed (16000, 544093) (nnz=1,459,707, density=1.68e-04) in 20.2s; OOV 0.0% of occurrences
+[wl] transformed (4000, 544093) (nnz=241,746, density=1.11e-04) in 4.9s; OOV 18.0% of occurrences
+[phi] depth 4 built in 46s
+[arm] h=4 cosine, masked: build=8s, 800 var solves
+[h=4 cosine, masked] solver non-convergence: 0/800 evals (0.0%)  (none)
+[arm] h=4 cosine, masked: density=2.768e-02 purity=1.000 isolated=18.9% med_deg=79 R2=0.7977 rho=+0.0570 recall=0.025 (232s)
+
+[arm] h=4 cosine, NO MASK: build=10s, 800 var solves
+[h=4 cosine, NO MASK] solver non-convergence: 0/800 evals (0.0%)  (none)
+[arm] h=4 cosine, NO MASK: density=5.892e-02 purity=0.470 isolated=15.5% med_deg=249 R2=0.7973 rho=+0.0715 recall=0.000 (1041s)
+
+[wl-fit]   vocab scan 5000/16000
+[wl-fit]   vocab scan 10000/16000
+[wl-fit]   vocab scan 15000/16000
+[wl-fit] 849276 raw labels -> 849276 kept (min_count=1) from 16000 sample mols in 20.9s; per-depth {1: 15330, 2: 90429, 3: 180275, 4: 258059, 5: 305183}
+[wl] transformed (16000, 849276) (nnz=1,937,244, density=1.43e-04) in 21.2s; OOV 0.0% of occurrences
+[wl] transformed (4000, 849276) (nnz=289,308, density=8.52e-05) in 5.3s; OOV 23.8% of occurrences
+[phi] depth 5 built in 47s
+[arm] h=5 cosine, masked: build=6s, 800 var solves
+[h=5 cosine, masked] solver non-convergence: 0/800 evals (0.0%)  (none)
+[arm] h=5 cosine, masked: density=1.647e-02 purity=1.000 isolated=30.2% med_deg=23 R2=0.7981 rho=+0.0320 recall=0.025 (112s)
+
+[arm] h=4 raw counts, masked: build=8s, 800 var solves
+[h=4 raw counts, masked] solver non-convergence: 0/800 evals (0.0%)  (none)
+[arm] h=4 raw counts, masked: density=2.768e-02 purity=1.000 isolated=18.9% med_deg=79 R2=0.8102 rho=+0.0067 recall=0.000 (451s)
+
+============================================================================================================
+kernel                        density   purity  isolated  med deg       R2  rho(s*,|e|)   top5%
+------------------------------------------------------------------------------------------------------------
+radius Wendland K=200       2.344e-02    1.000      0.0%      538   0.8079      +0.2088   0.158
+h=4 cosine, masked          2.768e-02    1.000     18.9%       79   0.7977      +0.0570   0.025
+h=4 cosine, NO MASK         5.892e-02    0.470     15.5%      249   0.7973      +0.0715   0.000
+h=5 cosine, masked          1.647e-02    1.000     30.2%       23   0.7981      +0.0320   0.025
+h=4 raw counts, masked      2.768e-02    1.000     18.9%       79   0.8102      +0.0067   0.000
+
+dist-to-NN baseline (no GP)                                                      +0.2995
+
+purity here is P(same category | connected) on the TRAIN Gram; the masked
+arms are 1.000 by construction, so only the NO MASK row is a discovery claim.
