@@ -1,0 +1,40 @@
+====================================================================================================
+K = 60   (mean over seeds [7, 42, 123]; 'c hi/lo' = ratio of the two cross-fitted scales -- instability)
+====================================================================================================
+                 candidate  scale fit      NLPD      CRPS   miscal   std(z)   c hi/lo
+             size+category        mle     2.519    1.5881   0.0805   1.0351       1.2
+            dist-to-NN raw        mle   220.510    7.4540   0.1523  12.7167      17.8
+            dist-to-NN raw     median   310.186    1.5743   0.0212  15.2458       1.1
+        dist-to-NN floored        mle     2.487    1.5882   0.0770   1.0146       1.1
+        GP sigma* (latent)        mle     2.588    1.6225   0.0996   1.0314       1.2
+         GP sigma* + noise        mle     2.601    1.6259   0.1018   1.0342       1.2
+
+====================================================================================================
+K = 200   (mean over seeds [7, 42, 123]; 'c hi/lo' = ratio of the two cross-fitted scales -- instability)
+====================================================================================================
+                 candidate  scale fit      NLPD      CRPS   miscal   std(z)   c hi/lo
+             size+category        mle     2.510    1.5704   0.0816   1.0347       1.2
+            dist-to-NN raw        mle    99.932    5.3227   0.1498   8.7175      12.1
+            dist-to-NN raw     median   153.380    1.5546   0.0193  10.9330       1.1
+        dist-to-NN floored        mle     2.469    1.5684   0.0766   1.0125       1.1
+        GP sigma* (latent)        mle     2.554    1.5995   0.0957   1.0231       1.1
+         GP sigma* + noise        mle     2.576    1.6042   0.1000   1.0297       1.2
+
+====================================================================================================
+K = 500   (mean over seeds [7, 42, 123]; 'c hi/lo' = ratio of the two cross-fitted scales -- instability)
+====================================================================================================
+                 candidate  scale fit      NLPD      CRPS   miscal   std(z)   c hi/lo
+             size+category        mle     2.502    1.5572   0.0826   1.0357       1.2
+            dist-to-NN raw        mle    43.370    3.8566   0.1479   5.8762       8.1
+            dist-to-NN raw     median    71.608    1.5423   0.0209   7.6992       1.1
+        dist-to-NN floored        mle     2.458    1.5554   0.0756   1.0121       1.1
+        GP sigma* (latent)        mle     2.523    1.5818   0.0918   1.0157       1.1
+         GP sigma* + noise        mle     2.554    1.5874   0.0981   1.0266       1.1
+
+Per-seed NLPD for dist-to-NN raw @ K=200 -- the instability, not an average:
+  seed    7: NLPD=   294.831  CRPS=  12.854  min(dnn)=3.67e-05  c hi/lo=34.1
+  seed   42: NLPD=     2.430  CRPS=   1.517  min(dnn)=7.39e-02  c hi/lo=1.1
+  seed  123: NLPD=     2.533  CRPS=   1.597  min(dnn)=4.01e-02  c hi/lo=1.2
+
+Step 3 reported dist-to-NN NLPD 2.379 (best of five). That was seed 42, the
+one seed with no near-duplicate test molecule. The metric is not reproducible.

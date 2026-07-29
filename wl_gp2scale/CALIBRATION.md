@@ -169,6 +169,19 @@ The GP's uncertainty is **not worthless** — it ranks at 3× chance on top-5% r
 is beaten on *every* metric by the distance to the nearest training point, and on most by a
 trivial `log n` + category model.
 
+> **⚠ Two corrections from the three-seed replication — see `RADIUS_CALIBRATION.md`.**
+> The *conclusion* of this table survives; two of its entries do not.
+> 1. **The NLPD / CRPS / miscal column for `dist-to-NN` is not reproducible.** A σ
+>    proportional to nearest-neighbour distance goes to 0 for a test molecule with a
+>    near-duplicate in the training set, and the MLE scale is then set by that one point.
+>    Seed 7 has such a molecule and gives NLPD 294.8; seed 42 — the only seed run here —
+>    does not. Floored at its 1st percentile the candidate still wins (NLPD 2.469), so the
+>    ranking of methods holds, but these raw numbers should not be quoted.
+> 2. **`size+category` outranks `dist-to-NN`, not the other way round.** At one seed they
+>    were within 0.002; across three seeds and all 800 points the cheap model wins by
+>    +0.019…+0.039 paired. The correct ordering is
+>    `size+category` > `dist-to-NN` > GP σ\*.
+
 **Why.** Sharpness is nearly constant across categories (2.44–2.89). With a 200-neighbour
 radius and a median of 458 in-support neighbours, even the "far" points have ample
 coverage, so σ\* barely varies — while `dist-to-NN` measures local sparsity directly, which
@@ -195,6 +208,15 @@ Recorded before running, and three of four were wrong.
 ---
 
 ## What this means, and what to do next
+
+> **⚠ RUN, AND REFUTED. The tradeoff below does not exist — see `RADIUS_CALIBRATION.md`.**
+> Tightening the radius makes σ\* *less* variable, not more (CV 0.181 at K=500 → 0.072 at
+> K=15), because at a tight radius nearly every point reverts to the **prior** (median
+> σ\*/√prior = 0.99) and a σ pinned at the prior is flatter than one pinned at a
+> well-informed value. R² and the ranking skill of σ\* both rise monotonically with the
+> radius. σ\* never overtakes `dist-to-NN` at any radius, in any seed, at 5–8 SE. The
+> paragraph below is left as written because the prediction it makes is the one the
+> experiment falsified.
 
 **The finding that changes the plan: there is an accuracy/calibration tradeoff in the
 support radius, and we have only ever tuned one side of it.** A wide radius improves R² and
