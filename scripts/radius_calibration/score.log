@@ -1,0 +1,119 @@
+loaded 15 arms: seeds=[7, 42, 123] K=[15, 30, 60, 200, 500]
+
+================================================================================================
+THE TRADEOFF: what the radius buys and what it costs
+================================================================================================
+    K  cut_wl  cut_gm   nbrs/test pt  frac 0-nbr   R2(GP)  sd(sigma*)/mean  warn
+   15   0.230   0.988             54        1.6%   0.7181           0.0719     0
+   30   0.264   1.108            102        0.7%   0.7209           0.0861     0
+   60   0.303   1.249            190        0.3%   0.7240           0.1039     0
+  200   0.393   1.565            538        0.0%   0.7293           0.1424     0
+  500   0.488   1.948           1226        0.0%   0.7337           0.1808     0
+  sd(sigma*)/mean is the COEFFICIENT OF VARIATION of the posterior sigma. A
+  sigma that does not vary cannot rank anything, whatever its average level.
+
+================================================================================================
+MECHANISM: how much of sigma* IS the baseline?
+================================================================================================
+    K   rho(sigma*, dist-NN)   rho(sigma*, #nbrs)   sigma*/sqrt(prior)
+   15                +0.6579              -0.7621               0.9909
+   30                +0.6610              -0.7433               0.9791
+   60                +0.6709              -0.7212               0.9565
+  200                +0.7069              -0.6696               0.8849
+  500                +0.7504              -0.5964               0.7937
+  If sigma* converges on dist-to-NN as the radius tightens, the GP is not
+  adding information -- it is recomputing the baseline at the cost of a solve
+  per test point. sigma*/sqrt(prior) -> 1 means reversion to the prior.
+
+================================================================================================
+RANKING: Spearman(sigma, |err|) and top-5% recall, all points, mean over seeds
+================================================================================================
+    K |     size+category |        dist-to-NN | GP sigma* (latent | GP sigma* + noise
+      |      rho      rec |      rho      rec |      rho      rec |      rho      rec
+------------------------------------------------------------------------------------------------
+   15 |  +0.2975    0.167 |  +0.2581    0.192 |  +0.1461    0.150 |  +0.1684    0.267
+   30 |  +0.3001    0.158 |  +0.2676    0.183 |  +0.1476    0.150 |  +0.1613    0.225
+   60 |  +0.3010    0.158 |  +0.2767    0.200 |  +0.1514    0.158 |  +0.1589    0.217
+  200 |  +0.3083    0.142 |  +0.2897    0.192 |  +0.1703    0.158 |  +0.1742    0.175
+  500 |  +0.3166    0.158 |  +0.2939    0.192 |  +0.1924    0.175 |  +0.1953    0.175
+
+================================================================================================
+THE ANSWER: sigma* MINUS dist-to-NN, paired within seed
+================================================================================================
+  positive = the GP's posterior variance beats a distance with no GP in it
+
+  Spearman:
+      K               per-seed differences      mean       SE      verdict
+     15          [-0.1426 -0.0782 -0.1152]   -0.1120   0.0187     baseline
+     30          [-0.1556 -0.0827 -0.1218]   -0.1200   0.0211     baseline
+     60          [-0.1633 -0.0896 -0.1231]   -0.1254   0.0213     baseline
+    200          [-0.1562 -0.0907 -0.1113]   -0.1194   0.0193     baseline
+    500          [-0.1252 -0.0864 -0.0927]   -0.1014   0.0120     baseline
+
+  top-5% recall:
+      K               per-seed differences      mean       SE      verdict
+     15             [ 0.    -0.15   0.025]   -0.0417   0.0546          tie
+     30             [-0.025 -0.15   0.075]   -0.0333   0.0651          tie
+     60             [-0.025 -0.175  0.075]   -0.0417   0.0726          tie
+    200                [ 0.   -0.15  0.05]   -0.0333   0.0601          tie
+    500                [ 0.   -0.1   0.05]   -0.0167   0.0441          tie
+
+================================================================================================
+PROPER SCORING RULES at each candidate's own best scale (2-fold cross-fitted)
+================================================================================================
+    K            candidate      NLPD      CRPS    miscal    std(z)
+   15             constant     2.642    1.6575    0.1056    1.0406
+   15        size+category     2.530    1.6088    0.0775    1.0356
+   15           dist-to-NN   288.239    8.5086    0.1530   14.4645
+   15   GP sigma* (latent)     2.618    1.6480    0.1016    1.0369
+   15    GP sigma* + noise     2.624    1.6502    0.1023    1.0373
+
+   30             constant     2.637    1.6476    0.1069    1.0407
+   30        size+category     2.525    1.5988    0.0792    1.0355
+   30           dist-to-NN   263.507    8.1143    0.1520   13.8530
+   30   GP sigma* (latent)     2.605    1.6359    0.1008    1.0349
+   30    GP sigma* + noise     2.614    1.6387    0.1020    1.0362
+
+   60             constant     2.631    1.6368    0.1078    1.0405
+   60        size+category     2.519    1.5881    0.0805    1.0351
+   60           dist-to-NN   220.510    7.4540    0.1523   12.7167
+   60   GP sigma* (latent)     2.588    1.6225    0.0996    1.0314
+   60    GP sigma* + noise     2.601    1.6259    0.1018    1.0342
+
+  200             constant     2.621    1.6195    0.1086    1.0404
+  200        size+category     2.510    1.5704    0.0816    1.0347
+  200           dist-to-NN    99.932    5.3227    0.1498    8.7175
+  200   GP sigma* (latent)     2.554    1.5995    0.0957    1.0231
+  200    GP sigma* + noise     2.576    1.6042    0.1000    1.0297
+
+  500             constant     2.615    1.6071    0.1089    1.0416
+  500        size+category     2.502    1.5572    0.0826    1.0357
+  500           dist-to-NN    43.370    3.8566    0.1479    5.8762
+  500   GP sigma* (latent)     2.523    1.5818    0.0918    1.0157
+  500    GP sigma* + noise     2.554    1.5874    0.0981    1.0266
+
+================================================================================================
+CAVEAT: categories too small to supply K same-category neighbours
+================================================================================================
+  cutoff_for_neighbors masks cross-category distances to inf, then DROPS the
+  non-finite k-th distances -- so these categories do not help set the radius,
+  and the arms are not measuring the same thing across the dataset.
+  K=  15: 0 categories excluded from the median (0.0% of test points) -- (none)
+  K=  30: 0 categories excluded from the median (0.0% of test points) -- (none)
+  K=  60: 0 categories excluded from the median (0.0% of test points) -- (none)
+  K= 200: 2 categories excluded from the median (2.4% of test points) -- orbnet_denali, spice
+  K= 500: 3 categories excluded from the median (4.8% of test points) -- orbnet_denali, rgd, spice
+
+  per-category Spearman(sigma*, |err|), pooled over seeds:
+              category  n_test      K=15      K=30      K=60     K=200     K=500   dist-NN
+                 ani2x     141    +0.171    +0.187    +0.191    +0.194    +0.246    +0.186
+          biomolecules     490    +0.131    +0.111    +0.087    +0.037    +0.014    +0.183
+                elytes     472    +0.098    +0.096    +0.086    +0.078    +0.087    +0.088
+            geom_orca6     113    +0.309    +0.340    +0.393    +0.418    +0.374    +0.311
+       metal_complexes     493    +0.049    +0.053    +0.064    +0.105    +0.153    +0.145
+         orbnet_denali      34        --        --        --        --        --        --
+            reactivity     470    +0.098    +0.097    +0.106    +0.119    +0.121    +0.120
+                   rgd      47    +0.119    +0.083    +0.072    +0.015    +0.007    +0.257
+                 spice      27        --        --        --        --        --        --
+               trans1x     113    +0.310    +0.349    +0.400    +0.384    +0.374    +0.260
+  (categories with <15 test points in a seed are skipped for that seed)
