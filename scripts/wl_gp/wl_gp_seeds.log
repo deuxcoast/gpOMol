@@ -1,0 +1,25 @@
+  seed  WL h=4 raw R2  radius R2       dR2    WL rho  radius rho      drho
+----------------------------------------------------------------------------
+    42         0.8102     0.8079   +0.0023   +0.0067     +0.2088   -0.2021
+[data] loaded materialised cache cache/materialized_20000.pkl (20,000 molecules) -- skipped 20,000 random lmdb lookups
+[wl-fit]   vocab scan 5000/16000
+[wl-fit]   vocab scan 10000/16000
+[wl-fit]   vocab scan 15000/16000
+[wl-fit] 545069 raw labels -> 545069 kept (min_count=1) from 16000 sample mols in 20.3s; per-depth {1: 15384, 2: 90936, 3: 180727, 4: 258022}
+[wl] transformed (16000, 545069) (nnz=1,453,293, density=1.67e-04) in 20.1s; OOV 0.0% of occurrences
+[wl] transformed (4000, 545069) (nnz=249,090, density=1.14e-04) in 5.1s; OOV 17.5% of occurrences
+[wl h4 raw s7] solver non-convergence: 0/800 evals (0.0%)  (none)
+     7         0.7370     0.7149   +0.0221   +0.0309     +0.1289   -0.0981
+[data] loaded materialised cache cache/materialized_20000.pkl (20,000 molecules) -- skipped 20,000 random lmdb lookups
+[wl-fit]   vocab scan 5000/16000
+[wl-fit]   vocab scan 10000/16000
+[wl-fit]   vocab scan 15000/16000
+[wl-fit] 545567 raw labels -> 545567 kept (min_count=1) from 16000 sample mols in 21.4s; per-depth {1: 15323, 2: 90875, 3: 180880, 4: 258489}
+[wl] transformed (16000, 545567) (nnz=1,458,001, density=1.67e-04) in 21.3s; OOV 0.0% of occurrences
+[wl] transformed (4000, 545567) (nnz=244,894, density=1.12e-04) in 5.2s; OOV 17.8% of occurrences
+[wl h4 raw s123] solver non-convergence: 0/800 evals (0.0%)  (none)
+   123         0.6781     0.6650   +0.0131   +0.1051     +0.1733   -0.0682
+
+  paired WL - radius, R^2: mean +0.0125  SE 0.0057  (significant at 2 SE)
+
+  paired WL - radius, rho(sigma*,|err|): mean -0.1228  SE 0.0406  (significant at 2 SE)

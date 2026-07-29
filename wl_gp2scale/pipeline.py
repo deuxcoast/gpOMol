@@ -290,6 +290,7 @@ def build_gp(
     logdet_verbose=False,
     args=None,
     channels=None,
+    kernel_override=None,
 ):
     """Construct the gp2Scale GPOptimizer with the sparse GPU block kernel.
 
@@ -340,7 +341,25 @@ def build_gp(
     require_imate()
     from gpcam import GPOptimizer
 
-    if channels is not None:
+    if kernel_override is not None:
+        # An arbitrary caller-supplied kernel_function(x1, x2, hps). Exists so a kernel
+        # that is NOT a compact-support Wendland on a dense embedding can still reuse
+        # everything else this function sets up -- the imate logdet rtol, the fail-fast
+        # Krylov cap emitted under every key a solver might read, the gp2Scale/dask
+        # wiring. Those are the parts that have silently produced wrong results before
+        # (an inert maxiter under MINRES, a logdet refined at 50x the needed cost), and
+        # a second copy of them in an experiment script is exactly how an arm stops
+        # being comparable to the sweep it is being judged against.
+        #
+        # The WL subtree kernel k = <phi(G), phi(G')> is the motivating case: its inputs
+        # are ROW INDICES into a scattered sparse count matrix rather than coordinates,
+        # and its sparsity is combinatorial (disjoint pattern support) rather than
+        # geometric, so no `cutoff` and no `channels` spec applies to it at all.
+        kern = kernel_override
+        init_hps = np.asarray(
+            signal_var if signal_var is not None else float(np.var(y_tr)),
+            dtype=float).ravel()
+    elif channels is not None:
         # Additive N-channel kernel k = sum_c sv_c psi_c. `channels` is a list of
         # ChannelSpec (or (start, stop, cutoff[, backend, k]) tuples); `signal_var` is
         # the per-channel signal-variance vector (default: var(y) split equally, so the
@@ -378,8 +397,9 @@ def build_gp(
     # range(len(x)) indexing bounds[i], so a too-long hps raises a bare IndexError deep
     # in training and a too-short one silently leaves init short while gpMCMC's prior
     # broadcast-misbehaves. Assert at construction, where the message can be useful.
-    _expect = (2 if cutoffs_are_hp else 1) * len(channels) if channels is not None \
-        else (2 if cutoff_is_hp else 1)
+    _expect = (len(init_hps) if kernel_override is not None else
+               ((2 if cutoffs_are_hp else 1) * len(channels) if channels is not None
+                else (2 if cutoff_is_hp else 1)))
     assert len(init_hps) == _expect, (
         f"init_hps has length {len(init_hps)}, expected {_expect} "
         f"(channels={None if channels is None else len(channels)}, "
