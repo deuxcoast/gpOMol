@@ -117,18 +117,13 @@ def main():
             ax.text(-0.012 * len(sub), (s0 + s1) / 2, str(names[cs[s0]]),
                     ha="right", va="center", fontsize=21, color="#3b3a37")
 
+    # Bare plot: category labels only. Title, subtitle and caption are deliberately NOT
+    # drawn -- they are set in the poster layout tool, where they can be typed at 60 pt+
+    # and kept consistent with every other heading on the board. The numbers they would
+    # have carried are printed to stdout above so they can be transcribed exactly.
     ax.set_xticks([]); ax.set_yticks([])
     for sp in ax.spines.values():
         sp.set_edgecolor("#9b9993"); sp.set_linewidth(1.6)
-    ax.set_xlabel(f"{len(sub):,} molecules, sorted by chemical family",
-                  fontsize=25, labelpad=18, color="#3b3a37")
-    ax.text(0.5, 1.045, f"{100 * (1 - dens_full):.1f}%  of the covariance matrix "
-            f"is exactly zero", transform=ax.transAxes, ha="center", va="bottom",
-            fontsize=31, fontweight="bold", color=BLUE)
-    ax.text(0.5, 1.005,
-            "compact support + chemical-family blocks — and inference stays exact",
-            transform=ax.transAxes, ha="center", va="bottom", fontsize=22,
-            color="#6b6963")
 
     fig.tight_layout()
     stem = a.stem[:-4] if a.stem.lower().endswith((".svg", ".png")) else a.stem

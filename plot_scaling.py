@@ -12,9 +12,9 @@ decision, not a taste one:
 
   * type at 24-34 pt and lines at 5-6 px, because poster body text below ~24 pt is
     unreadable at standing distance and a 2.5 px line disappears entirely;
-  * NO in-figure title -- on a poster the section headline is set in the layout tool at
-    60 pt+, and an embedded 32 pt title next to it looks like a mistake. Pass
-    --title to override;
+  * the +/- std across seeds stays a filled band rather than error bars -- bars read as
+    more precise but they clutter a figure whose message is the GAP between two curves;
+    pass --no-title if the layout tool is setting the headline instead;
   * transparent background, so the figure sits on whatever panel colour the poster uses
     rather than punching a white rectangle into it;
   * both endpoint R^2 values called out large, since "0.34 -> 0.56" IS the result and a
@@ -34,7 +34,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 argv = [a for a in sys.argv[1:]]
 POSTER = "--poster" in argv
-WANT_TITLE = "--title" in argv
+NO_TITLE = "--no-title" in argv
 argv = [a for a in argv if not a.startswith("--")]
 out = argv[0] if argv else ("scaling_poster" if POSTER else "scaling.png")
 rec = {}
@@ -81,15 +81,12 @@ if not POSTER:
 plt.rcParams.update({"font.size": 24, "font.family": "DejaVu Sans"})
 fig, ax = plt.subplots(figsize=(13, 9))
 
-# Error BARS, not a filled band. The seed spread at 20k is +/-0.076 -- wide enough that
-# fill_between renders as two overlapping slabs that swamp the lines and hide the very
-# gap the figure exists to show. Bars carry the same information and stay out of the way.
-ax.errorbar(Ns, olm, yerr=ols, fmt="s--", color=OLS_C, lw=5, ms=17, mew=0,
-            elinewidth=3, capsize=10, capthick=3,
-            label="Linear baseline (OLS, same descriptor)")
-ax.errorbar(Ns, gpm, yerr=gps, fmt="o-", color=GP_C, lw=6.5, ms=22, mew=0,
-            elinewidth=3, capsize=10, capthick=3,
-            label="Exact GP (Wendland + linear prior mean)")
+ax.fill_between(Ns, gpm - gps, gpm + gps, color=GP_C, alpha=0.15, lw=0)
+ax.fill_between(Ns, olm - ols, olm + ols, color="#898781", alpha=0.15, lw=0)
+ax.plot(Ns, gpm, "o-", color=GP_C, lw=6.5, ms=22, mew=0,
+        label="GP (Wendland + linear prior mean)")
+ax.plot(Ns, olm, "s--", color=OLS_C, lw=5, ms=17, mew=0,
+        label="OLS (linear baseline)")
 
 ax.set_xscale("log")
 ax.set_xticks(Ns)
@@ -98,19 +95,19 @@ ax.tick_params(axis="y", labelsize=28, length=8, width=2)
 ax.tick_params(axis="x", length=8, width=2)
 ax.set_xlabel("training molecules   N", fontsize=32, labelpad=16)
 ax.set_ylabel("held-out  R²", fontsize=32, labelpad=16)
-if WANT_TITLE:
-    ax.set_title("Accuracy keeps climbing to 200k", fontsize=36, pad=26)
+if not NO_TITLE:
+    ax.set_title("Graph-only GP scales and beats the linear baseline",
+                 fontsize=36, pad=26)
 
 # The two endpoints ARE the finding; a poster reader should not have to trace the axis.
 for N, g, dy, fs in ((Ns[0], gpm[0], 30, 40), (Ns[-1], gpm[-1], 24, 46)):
     ax.annotate(f"{g:.2f}", (N, g), textcoords="offset points", xytext=(0, dy),
                 ha="center", fontsize=fs, color="#185fa5", fontweight="bold")
 
-# headroom so the 0.56 callout is not clipped, and the legend goes UPPER LEFT -- the one
-# quadrant a monotonically rising curve leaves empty.
+# headroom only at the top, so the 0.56 callout clears the axes without clipping
 lo = min((olm - ols).min(), (gpm - gps).min())
 hi = max((olm + ols).max(), (gpm + gps).max())
-ax.set_ylim(lo - 0.03, hi + 0.075)
+ax.set_ylim(lo - 0.015, hi + 0.045)
 
 ax.grid(alpha=0.28, lw=1.6)
 ax.set_axisbelow(True)
@@ -118,10 +115,12 @@ for side in ("top", "right"):
     ax.spines[side].set_visible(False)
 for side in ("left", "bottom"):
     ax.spines[side].set_linewidth(2)
-leg = ax.legend(frameon=False, loc="upper left", fontsize=25,
-                handlelength=2.6, borderaxespad=0.8)
-for t, c in zip(leg.get_texts(), (OLS_C, GP_C)):
-    t.set_color(c)
+leg = ax.legend(frameon=False, loc="lower right", fontsize=25,
+                handlelength=2.6, borderaxespad=1.2)
+# colour each label from its OWN handle -- a hard-coded (GP, OLS) tuple silently swaps
+# the moment the plot calls are reordered, which is exactly what happened once already
+for t, h in zip(leg.get_texts(), leg.legend_handles):
+    t.set_color(h.get_color())
 
 fig.tight_layout()
 stem = out[:-4] if out.lower().endswith((".svg", ".png")) else out
