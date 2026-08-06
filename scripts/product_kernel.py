@@ -210,9 +210,16 @@ def main():
         base_cuts, slices, off = [], [], 0
         for n in KERNEL_CHAN:
             dd = emb[n]["Ztr"].shape[1]
+            # sample MUST match percat_radius.py's, not just for driver RAM (6.4 GB at
+            # 200k with the old hardcoded 5000, plus a partition copy) but for the
+            # EXPERIMENT: this is the global radius the additive baseline actually
+            # runs at, and glob_cuts below sets the density target the product arm
+            # bisects onto. A different sample here gives a different radius, so the
+            # two arms would no longer be density-matched -- silently, since each
+            # script's own numbers stay self-consistent.
             base_cuts.append(cutoff_for_neighbors(
                 emb[n]["Ztr"], emb[n]["Zte"], K, dim=dd, data_id_tr=cat_tr,
-                data_id_te=cat_te, sample=5000))
+                data_id_te=cat_te, sample=a.diag_sample))
             slices.append((off, off + dd)); off += dd
         base_cuts = np.array(base_cuts)
         glob_cuts = base_cuts.copy()
@@ -245,6 +252,20 @@ def main():
         del bands
         print(f"[prod] seed {seed}: matched at scale x{s:.3f} -> density {d_p:.4e} "
               f"(median {nb_p:.0f} nbrs, {iso_p:.1%} isolated)")
+        # DENSITY MATCHING IS THE COMPARISON. The bracket [1, 8] was set at 20k, where
+        # x1.59 sufficed; intersection density falls faster with N than union does, so
+        # the required scale GROWS and the bracket can saturate. A saturated bisection
+        # returns hi and quietly leaves the product arm sparser than the baseline,
+        # which is exactly the confound the matching exists to remove -- and it would
+        # read as "the product kernel is worse at scale".
+        rel = abs(d_p - d_add) / max(d_add, 1e-12)
+        if rel > 0.05:
+            raise SystemExit(
+                f"[prod] ABORT seed {seed}: density matching FAILED -- product "
+                f"{d_p:.4e} vs additive target {d_add:.4e} ({rel:.1%} off) at scale "
+                f"x{s:.3f} in bracket [1, 8]. The arms would not be density-matched. "
+                f"Widen the bracket (hi) and rerun; do not score this."
+            )
 
         if a.percat:
             specs = [ChannelSpec(sl[0], sl[1], float(np.median(c)))

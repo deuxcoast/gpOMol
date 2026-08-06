@@ -69,7 +69,12 @@ def main():
     print("-" * 104)
     tab = {}
     for arm in arms:
-        rs, rec, rd, rc, dif = [], [], [], [], []
+        rs, rec, rd, rc = [], [], [], []
+        # KEYED BY SEED, not appended positionally. An arm missing one seed used to
+        # shift this list against `seeds`, so the paired block below differenced seed i
+        # of one arm against seed j of the baseline and printed a plausible wrong
+        # number rather than failing.
+        tab[arm] = {}
         for s in seeds:
             d = A.get((arm, s))
             if d is None:
@@ -79,12 +84,11 @@ def main():
             x2, _ = rank(d["dnn"], ae)
             x3, _ = rank(d["sd_cheap"], ae)
             rs.append(x1); rec.append(h1); rd.append(x2); rc.append(x3)
-            dif.append(x1 - x2)
-        dif = np.array(dif)
+            tab[arm][s] = x1 - x2
+        dif = np.array([tab[arm][s] for s in seeds if s in tab[arm]])
         se = dif.std(ddof=1) / np.sqrt(len(dif)) if len(dif) > 1 else np.nan
         v = ("GP WINS" if dif.mean() > 2 * se else
              "baseline" if -dif.mean() > 2 * se else "tie")
-        tab[arm] = dif
         print(f"{arm:>9} | {np.mean(rs):>+12.4f} {np.mean(rec):>7.3f} | "
               f"{np.mean(rd):>+13.4f} {np.mean(rc):>+14.4f} | "
               f"{dif.mean():>+13.4f} {se:>7.4f} {v:>10}")
@@ -99,7 +103,7 @@ def main():
         for arm in arms:
             if arm == "global":
                 continue
-            dr2, drho, dgap = [], [], []
+            dr2, drho, dgap, paired = [], [], [], []
             for s in seeds:
                 x, b = A.get((arm, s)), A.get(("global", s))
                 if x is None or b is None:
@@ -108,7 +112,15 @@ def main():
                 rx = rank(np.sqrt(np.maximum(x["v_gp"], 0)), np.abs(x["err"]))[0]
                 rb = rank(np.sqrt(np.maximum(b["v_gp"], 0)), np.abs(b["err"]))[0]
                 drho.append(rx - rb)
-                dgap.append(tab[arm][seeds.index(s)] - tab["global"][seeds.index(s)])
+                dgap.append(tab[arm][s] - tab["global"][s])
+                paired.append(s)
+            if not dgap:
+                print(f"{arm:>9} {'--':>10} {'--':>15} {'--':>16} {'--':>8}"
+                      f"   (no seed shared with the global baseline)")
+                continue
+            if len(paired) < len(seeds):
+                print(f"{arm:>9}   NOTE: paired on seeds {paired} only "
+                      f"(of {seeds}) -- the baseline is missing the rest")
             dgap = np.array(dgap)
             se = dgap.std(ddof=1) / np.sqrt(len(dgap)) if len(dgap) > 1 else np.nan
             print(f"{arm:>9} {np.mean(dr2):>+10.4f} {np.mean(drho):>+15.4f} "
