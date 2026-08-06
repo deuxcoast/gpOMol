@@ -41,8 +41,17 @@ def main():
         d = np.load(f, allow_pickle=True)
         A[(str(d["arm"]), int(d["seed"]))] = d
     seeds = sorted({s for _, s in A})
-    arms = [a for a in ARMS if any((a, s) in A for s in seeds)]
-    print(f"loaded {len(A)} arms: {arms} x seeds {seeds}\n")
+    # ARMS only fixes the DISPLAY ORDER. Filtering by it silently dropped any arm whose
+    # tag was not hardcoded here -- a result file present on disk and absent from the
+    # table, which is the same class of failure as a missing arm: a complete-looking
+    # comparison that quietly omits one side. Anything unrecognised is appended, loudly.
+    present = {a for a, _ in A}
+    arms = [a for a in ARMS if a in present]
+    extra = sorted(present - set(ARMS))
+    if extra:
+        print(f"NOTE: arm(s) not in this script's ARMS list, appended: {extra}")
+    arms += extra
+    print(f"loaded {len(A)} result files: arms {arms} x seeds {seeds}\n")
 
     # EVERY NUMBER BELOW IS A DIFFERENCE BETWEEN ARMS, so arms run at different N (or a
     # different test-set size) are not comparable. The result filenames carry only the
@@ -85,6 +94,19 @@ def main():
               f"{np.mean(g) - np.mean(o):>+12.4f} {sum(w):>5}")
 
     print()
+    # Arms run with --no-variance have no sigma*, no dist-to-NN and no size+category
+    # model -- only accuracy. Ranking their NaNs would emit a row of nan that reads as
+    # a failed arm rather than an absent measurement.
+    def has_var(arm):
+        return any("has_variance" not in A[(arm, s)].files
+                   or int(A[(arm, s)]["has_variance"]) for s in seeds if (arm, s) in A)
+
+    uq_arms = [a for a in arms if has_var(a)]
+    acc_only = [a for a in arms if a not in uq_arms]
+    if acc_only:
+        print(f"accuracy-only arms (--no-variance), omitted from the UQ tables below: "
+              f"{acc_only}\n")
+
     print("=" * 104)
     print("UNCERTAINTY: does a per-category radius make sigma* a better ranker?")
     print("=" * 104)
@@ -92,7 +114,7 @@ def main():
           f"{'rho(size+cat)':>14} | {'sigma* - dNN':>13} {'SE':>7} {'verdict':>10}")
     print("-" * 104)
     tab = {}
-    for arm in arms:
+    for arm in uq_arms:
         rs, rec, rd, rc = [], [], [], []
         # KEYED BY SEED, not appended positionally. An arm missing one seed used to
         # shift this list against `seeds`, so the paired block below differenced seed i
@@ -124,7 +146,7 @@ def main():
         print("=" * 104)
         print(f"{'arm':>9} {'d GP_R2':>10} {'d rho(sigma*)':>15} "
               f"{'d [sigma*-dNN]':>16} {'SE':>8}")
-        for arm in arms:
+        for arm in uq_arms:
             if arm == "global":
                 continue
             dr2, drho, dgap, paired = [], [], [], []
@@ -160,10 +182,10 @@ def main():
         cn = d0["cat_names"]
         ratio = d0["cuts_cat"] / d0["cuts_glob"][:, None]
         print(f"{'category':>18} {'rho_wl/glob':>12} {'rho_gm/glob':>12} "
-              + " ".join(f"{a[:8]:>9}" for a in arms))
+              + " ".join(f"{a[:8]:>9}" for a in uq_arms))
         for c in range(len(cn)):
             row = []
-            for arm in arms:
+            for arm in uq_arms:
                 rr = []
                 for s in seeds:
                     d = A.get((arm, s))
