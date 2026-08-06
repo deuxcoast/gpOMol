@@ -170,6 +170,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seeds", type=int, nargs="+", default=[42, 7, 123])
     ap.add_argument("--emb-dir", default="cache", help="cache for emb_{N}_s{seed}.npz")
+    ap.add_argument("--mean", default="M1", choices=["M1", "M4"],
+                    help="prior mean rung. M1 = linear on the embedding; M4 adds the "
+                         "size x embedding interaction. M4 is stronger (+0.09 R^2) but "
+                         "leaves the kernel far less to do (+0.022 vs +0.040) and had "
+                         "the WORST UQ gap of any rung, so which one production should "
+                         "use is an open question, not a default.")
     ap.add_argument("--out", default="cache/percat")
     ap.add_argument("--arm", default="percat", choices=["global", "percat", "matched"],
                     help="global = one cutoff at the 200-neighbour target (the "
@@ -195,7 +201,7 @@ def main():
     names = np.array(ds.category_names)
 
     for seed in a.seeds:
-        tag = a.arm
+        tag = a.arm + ("" if a.mean == "M1" else "-M4")
         out = os.path.join(a.out, f"{tag}_s{seed}.npz")
         if os.path.exists(out):
             print(f"[percat] {out} exists, skipping")
@@ -205,6 +211,7 @@ def main():
         y_tr, y_te = ds.y[tr], ds.y[te]
         cat_tr, cat_te = ds.data_id[tr], ds.data_id[te]
         size_te = np.array([len(ds.atoms[i]) for i in te], float)
+        size_tr = np.array([len(ds.atoms[i]) for i in tr], float)
         sel = np.random.default_rng(0).choice(len(y_te), NTE, replace=False)
 
         emb = load_or_build_embeddings(ds, tr, te, cat_tr, cat_te, seed, a.emb_dir)
@@ -214,8 +221,10 @@ def main():
         Zk_te = np.hstack([emb[n]["Zte"] for n in KERNEL_CHAN])
 
         # M1: linear on the embedding, NO size interaction (matches ladder rung M1)
-        mean = LinearEmbeddingMean().fit(Zm_tr, y_tr, size=None)
-        r_tr = y_tr - mean.predict(Zm_tr, size=None)
+        msz = size_tr if a.mean == "M4" else None
+        tsz = size_te if a.mean == "M4" else None
+        mean = LinearEmbeddingMean().fit(Zm_tr, y_tr, size=msz)
+        r_tr = y_tr - mean.predict(Zm_tr, size=msz)
         prior_var = float(np.var(r_tr))
 
         specs, slices, off = [], [], 0
@@ -282,24 +291,23 @@ def main():
             cl.close()
         wc.report(n_evals=NTE, label=f"{tag}-s{seed}")
 
-        mu = mean.predict(Zm_te, size=None)[sel] + m_gp
+        mu = mean.predict(Zm_te, size=tsz)[sel] + m_gp
         err = y_te[sel] - mu
         # baselines, formed exactly as the ladder formed them for rung M1
         Dn = cdist(Zk_te[sel], Zk_tr)
         Dn[cat_te[sel][:, None] != cat_tr[None, :]] = np.inf
         dnn = Dn.min(axis=1)
         D_tr, D_te = np.eye(ncat)[cat_tr], np.eye(ncat)[cat_te]
-        size_tr = np.array([len(ds.atoms[i]) for i in tr], float)
         V_tr = np.hstack([np.ones((len(tr), 1)), np.log(size_tr)[:, None], D_tr[:, 1:]])
         V_te = np.hstack([np.ones((len(te), 1)), np.log(size_te)[:, None], D_te[:, 1:]])
         bv, *_ = np.linalg.lstsq(V_tr, np.log(r_tr ** 2 + 1e-8), rcond=None)
         sd_cheap = np.exp(0.5 * (V_te @ bv))[sel]
 
-        np.savez(out, seed=seed, rung="M1", arm=tag, y=y_te[sel], mu=mu, err=err,
+        np.savez(out, seed=seed, rung=a.mean, arm=tag, y=y_te[sel], mu=mu, err=err,
                  v_gp=v_gp, dnn=dnn, sd_cheap=sd_cheap, cat=cat_te[sel],
                  cuts_cat=cuts_cat, cuts_glob=np.array(cuts_glob), scale=scale,
                  dens_global=dens_g, dens_percat=dens_p, prior_var=prior_var,
-                 ols_r2=r2_score(y_te[sel], mean.predict(Zm_te, size=None)[sel]),
+                 ols_r2=r2_score(y_te[sel], mean.predict(Zm_te, size=tsz)[sel]),
                  n_warn=int(wc.total), cat_names=names)
         print(f"[percat] seed {seed} {tag}: GP_R2={r2_score(y_te[sel], mu):.4f} "
               f"({time.time() - t0:.0f}s) -> {out}\n")
