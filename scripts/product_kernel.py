@@ -157,6 +157,14 @@ def main():
                     help="rows in the driver-side density band. Each channel holds a "
                          "dense (sample x n_train) float64 block ON THE DRIVER: 0.6 GB at "
                          "20k but 6.4 GB at 200k, per channel. Lower to ~1000 at scale")
+    ap.add_argument("--no-variance", action="store_true",
+                    help="skip the posterior VARIANCE and report accuracy only, on the "
+                         "FULL test set. Variance is one linear solve per test point "
+                         "and is ~99%% of the wall time at 200k; the mean is one solve "
+                         "total. Use this for scaling/accuracy rungs, and validate UQ "
+                         "at 20k where the variance is affordable. Arms written this "
+                         "way carry has_variance=0 and the scorer omits them from the "
+                         "UQ tables instead of ranking their NaNs.")
     ap.add_argument("--kernel-chan", default="wl,geom",
                     help="channels multiplied INTO THE KERNEL, comma separated. The "
                          "default wl,geom is the pair the +0.068 result was measured "
@@ -358,41 +366,69 @@ def main():
                 tb = time.time()
                 gp, _ = build_gp(Xs, ys, None, None, cl, kernel_override=kern,
                                  signal_var=[prior_var], jitter=JITTER, **SOLVE)
-                print(f"[prod] seed {seed}: GP built in {time.time() - tb:.0f}s. Now "
-                      f"{a.nte} posterior variances = {a.nte} SEPARATE LINEAR SOLVES "
-                      f"against the full system -- the dominant cost at this N.",
-                      flush=True)
-                m_gp, v_gp = predict(gp, with_category_tag(Zk_te[sel], cat_te[sel]),
-                                     batch=100, variance=True, verbose=True)
+                if a.no_variance:
+                    # The posterior MEAN reuses the precomputed KVinvY, so it costs ONE
+                    # solve in total no matter how many test points. Variance is what
+                    # costs one solve EACH. With variance off, evaluating on the full
+                    # test set is therefore free and gives a much tighter R^2 (40k
+                    # points instead of 800 at 200k) -- this is the whole speed
+                    # difference between this and dim_sweep.
+                    print(f"[prod] seed {seed}: GP built in {time.time() - tb:.0f}s. "
+                          f"Mean only on ALL {len(te):,} test points (one solve total; "
+                          f"--no-variance, so no UQ columns).", flush=True)
+                    m_gp, v_gp = predict(gp, with_category_tag(Zk_te, cat_te),
+                                         batch=2000, variance=False, verbose=True)
+                else:
+                    print(f"[prod] seed {seed}: GP built in {time.time() - tb:.0f}s. Now "
+                          f"{a.nte} posterior variances = {a.nte} SEPARATE LINEAR SOLVES "
+                          f"against the full system -- the dominant cost at this N.",
+                          flush=True)
+                    m_gp, v_gp = predict(gp, with_category_tag(Zk_te[sel], cat_te[sel]),
+                                         batch=100, variance=True, verbose=True)
             del gp
             release_gp(cl)
         finally:
             cl.close()
-        wc.report(n_evals=a.nte, label=f"prod-s{seed}")
+        wc.report(n_evals=(len(te) if a.no_variance else a.nte), label=f"prod-s{seed}")
 
-        mu = mean.predict(Zm_te, size=tsz)[sel] + m_gp
-        err = y_te[sel] - mu
-        Dn = cdist(Zk_te[sel], Zk_tr)
-        Dn[cat_te[sel][:, None] != cat_tr[None, :]] = np.inf
-        dnn = Dn.min(axis=1)
-        D_tr, D_te = np.eye(ncat)[cat_tr], np.eye(ncat)[cat_te]
-        V_tr = np.hstack([np.ones((len(tr), 1)), np.log(size_tr)[:, None], D_tr[:, 1:]])
-        V_te = np.hstack([np.ones((len(te), 1)), np.log(size_te)[:, None], D_te[:, 1:]])
-        bv, *_ = np.linalg.lstsq(V_tr, np.log(r_tr ** 2 + 1e-8), rcond=None)
-        sd_cheap = np.exp(0.5 * (V_te @ bv))[sel]
+        # which test points this arm reports on: all of them under --no-variance,
+        # otherwise the nte-point variance subset
+        ev = np.arange(len(y_te)) if a.no_variance else sel
+        mu = mean.predict(Zm_te, size=tsz)[ev] + m_gp
+        err = y_te[ev] - mu
+        if a.no_variance:
+            # dist-to-NN is a (n_eval x n_train) dense block -- 40k x 160k = 51 GB at
+            # 200k. It is a UQ baseline and there is no UQ here, so skip it rather
+            # than sample it and half-report an arm the scorer would then rank.
+            dnn = np.full(len(ev), np.nan)
+            sd_cheap = np.full(len(ev), np.nan)
+        else:
+            Dn = cdist(Zk_te[sel], Zk_tr)
+            Dn[cat_te[sel][:, None] != cat_tr[None, :]] = np.inf
+            dnn = Dn.min(axis=1)
+            D_tr, D_te = np.eye(ncat)[cat_tr], np.eye(ncat)[cat_te]
+            V_tr = np.hstack([np.ones((len(tr), 1)), np.log(size_tr)[:, None],
+                              D_tr[:, 1:]])
+            V_te = np.hstack([np.ones((len(te), 1)), np.log(size_te)[:, None],
+                              D_te[:, 1:]])
+            bv, *_ = np.linalg.lstsq(V_tr, np.log(r_tr ** 2 + 1e-8), rcond=None)
+            sd_cheap = np.exp(0.5 * (V_te @ bv))[sel]
 
-        np.savez(out, seed=seed, arm=tag, rung=a.mean, n=a.n, nte=a.nte,
+        np.savez(out, seed=seed, arm=tag, rung=a.mean, n=a.n,
+                 nte=(len(te) if a.no_variance else a.nte),
+                 has_variance=int(not a.no_variance),
                  diag_sample=a.diag_sample, kernel_chan=np.array(kchan),
-                 y=y_te[sel], mu=mu, err=err,
-                 v_gp=v_gp, dnn=dnn, sd_cheap=sd_cheap, cat=cat_te[sel],
+                 y=y_te[ev], mu=mu, err=err,
+                 v_gp=v_gp, dnn=dnn, sd_cheap=sd_cheap, cat=cat_te[ev],
                  cuts_cat=(cuts if cuts.ndim == 2 else
                            np.repeat(cuts[:, None], ncat, axis=1)),
                  cuts_glob=glob_cuts, scale=s,
                  dens_global=d_add, dens_percat=d_p, dens_natural=d_nat,
                  med_nbrs=nb_p, isolated=iso_p, prior_var=prior_var,
-                 ols_r2=r2_score(y_te[sel], mean.predict(Zm_te, size=tsz)[sel]),
+                 ols_r2=r2_score(y_te[ev], mean.predict(Zm_te, size=tsz)[ev]),
                  n_warn=int(wc.total), cat_names=np.array(ds.category_names))
-        print(f"[prod] seed {seed} {tag}: GP_R2={r2_score(y_te[sel], mu):.4f} "
+        print(f"[prod] seed {seed} {tag}: GP_R2={r2_score(y_te[ev], mu):.4f} "
+              f"on {len(ev):,} test pts "
               f"({time.time() - t0:.0f}s) -> {out}\n")
 
 
