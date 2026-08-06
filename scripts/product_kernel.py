@@ -1,0 +1,229 @@
+"""Multiplicative kernel: k = k_wl * k_geom, against the additive k_wl + k_geom.
+
+THE MECHANISM BEING TESTED, and it is about UQ rather than accuracy. Under the ADDITIVE
+kernel a molecule counts as covered if it has neighbours close in graph topology OR in
+geometry, so the support is a UNION. Under the PRODUCT it needs neighbours close in BOTH,
+so the support is an INTERSECTION. Coverage is exactly what the posterior variance
+measures, so a stricter notion of coverage is a real mechanism for making sigma* respond
+to genuine novelty -- the first such mechanism in this project that is not just "move the
+radius", which RADIUS_CALIBRATION.md showed does not work.
+
+Chemically it is also the more defensible statement: two molecules with the same bond graph
+but different conformations should not be called similar, and the additive kernel currently
+says they are.
+
+PSD comes free from the Schur product theorem (the elementwise product of PSD matrices is
+PSD), so no new theory is needed. Signal variance enters once, not per channel: the
+diagonal is sv * psi(0) * psi(0) = sv, against the additive kernel's sv_wl + sv_geom.
+
+THE RADIUS POLICY IS THE WHOLE DIFFICULTY. Intersection support is drastically sparser
+than union at the same per-channel radii -- if the channels were independent, 3.9e-2 would
+become ~4.9e-4. Worse, holding each channel at a fixed neighbour count makes the product's
+density fall as ~1/N^2, so the matrix would go essentially diagonal at 200k. Both channel
+radii therefore have to be widened until the PRODUCT hits the target. That is a knob we
+control, which is precisely what the WL subtree kernel lacked when its density turned out
+to be scale-invariant.
+
+ARMS. `matched` bisects one common multiplier on both channel radii until realised train
+density equals the additive baseline's, so the product is compared at EQUAL COST and the
+only thing differing is the shape of the support. The unrescaled ("natural") density is
+reported without fitting, since at ~8 neighbours per row it would be dominated by mean
+reversion and would not test the mechanism.
+
+BASELINE: cache/percat/global_s{seed}.npz -- additive kernel, one global radius at the
+200-neighbour target, same M1 mean, same jitter, same 800 test points, same seeds.
+"""
+import argparse
+import os
+import sys
+import time
+
+import numpy as np
+from scipy.spatial.distance import cdist
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import r2_score
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from wl_gp2scale.kernel import ChannelSpec, _wendland32  # noqa: E402
+from percat_radius import load_or_build_embeddings  # noqa: E402
+
+N, NTE, JITTER, K = 20_000, 800, 4.30, 200
+KERNEL_CHAN = ("wl", "geom")
+MEAN_CHAN = ("wl", "geom", "strain")
+SOLVE = dict(linalg_mode="sparseCG", solve_maxiter=2000, solve_tol=1e-6,
+             batch_size=10_000, compute_device="cpu", device="cpu")
+
+
+class ProductWendlandKernel:
+    """k(x,x') = sv * prod_c psi(d_c / rho_c), zeroed across categories.
+
+    Mirrors AdditiveWendlandKernel's structure and device handling; the only change is
+    that channel blocks MULTIPLY instead of summing, and there is a single signal
+    variance because the diagonal is a product of ones rather than a sum."""
+
+    def __init__(self, channels, cats=None, device="cpu", dtype="float64"):
+        self.channels = [c if isinstance(c, ChannelSpec) else ChannelSpec(*c)
+                         for c in channels]
+        self.device, self.dtype = device, dtype
+        self._total_dim = self.channels[-1].stop
+
+    def __call__(self, x1, x2, hps):
+        import torch
+        td = torch.float64 if self.dtype == "float64" else torch.float32
+        x1, x2 = np.asarray(x1), np.asarray(x2)
+        n1, n2 = x1.shape[0], x2.shape[0]
+        cats1 = x1[:, self._total_dim].astype(np.int64)
+        cats2 = x2[:, self._total_dim].astype(np.int64)
+        if np.intersect1d(np.unique(cats1), np.unique(cats2)).size == 0:
+            return np.zeros((n1, n2), dtype=np.float64)
+
+        dev = self.device
+        Kp = torch.ones((n1, n2), dtype=td, device=dev)
+        for ch in self.channels:
+            a = torch.as_tensor(x1[:, ch.start:ch.stop], dtype=td, device=dev)
+            b = torch.as_tensor(x2[:, ch.start:ch.stop], dtype=td, device=dev)
+            D = torch.cdist(a, b, compute_mode="donot_use_mm_for_euclid_dist")
+            t = torch.clamp(D / float(ch.cutoff), 0.0, 1.0)
+            Kc = torch.where(t < 1.0, _wendland32(t), torch.zeros_like(t))
+            Kp = Kp * Kc                       # INTERSECTION support
+        Kp = Kp * float(hps[0])
+        ca = torch.as_tensor(cats1, device=dev).view(-1, 1)
+        cb = torch.as_tensor(cats2, device=dev).view(1, -1)
+        Kp = torch.where(ca == cb, Kp, torch.zeros_like(Kp))
+        return Kp.to("cpu").double().numpy()
+
+
+def support_stats(Ztr, cat_tr, cuts, slices, mode, sample=5000, seed=0):
+    """Realised density, median neighbours per row and isolated fraction.
+    mode='union' reproduces the additive kernel's support, 'inter' the product's."""
+    rng = np.random.default_rng(seed)
+    idx = rng.choice(len(Ztr), size=min(sample, len(Ztr)), replace=False)
+    nz = None
+    for c, (s, e) in enumerate(slices):
+        near = cdist(Ztr[idx, s:e], Ztr[:, s:e]) < cuts[c]
+        nz = near if nz is None else (nz | near if mode == "union" else nz & near)
+    nz &= cat_tr[idx][:, None] == cat_tr[None, :]
+    deg = nz.sum(axis=1) - 1                    # drop the self entry
+    return float(nz.mean()), float(np.median(deg)), float(np.mean(deg <= 0))
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--seeds", type=int, nargs="+", default=[42, 7, 123])
+    ap.add_argument("--emb-dir", default="cache")
+    ap.add_argument("--out", default="cache/product")
+    a = ap.parse_args()
+    os.makedirs(a.out, exist_ok=True)
+
+    from distributed import Client
+    from fvgp.gp_lin_alg import _resolve_krylov_mode
+    from wl_gp2scale.cutoff import cutoff_for_neighbors
+    from wl_gp2scale.data import get_data
+    from wl_gp2scale.reduce import LinearEmbeddingMean
+    from wl_gp2scale.pipeline import (build_gp, predict, release_gp, sort_by_category,
+                                      with_category_tag, SolveWarningCounter)
+    assert _resolve_krylov_mode(None) == "single", "fvgp block CG is broken"
+
+    ds = get_data(src="train_4M", n=N, seed=0)
+    idx = np.arange(len(ds.atoms))
+    ncat = len(ds.category_names)
+
+    for seed in a.seeds:
+        out = os.path.join(a.out, f"product_s{seed}.npz")
+        if os.path.exists(out):
+            print(f"[prod] {out} exists"); continue
+
+        tr, te = train_test_split(idx, test_size=0.2, random_state=seed)
+        y_tr, y_te = ds.y[tr], ds.y[te]
+        cat_tr, cat_te = ds.data_id[tr], ds.data_id[te]
+        size_te = np.array([len(ds.atoms[i]) for i in te], float)
+        size_tr = np.array([len(ds.atoms[i]) for i in tr], float)
+        sel = np.random.default_rng(0).choice(len(y_te), NTE, replace=False)
+
+        emb = load_or_build_embeddings(ds, tr, te, cat_tr, cat_te, seed, a.emb_dir)
+        Zm_tr = np.hstack([emb[n]["Ztr"] for n in MEAN_CHAN])
+        Zm_te = np.hstack([emb[n]["Zte"] for n in MEAN_CHAN])
+        Zk_tr = np.hstack([emb[n]["Ztr"] for n in KERNEL_CHAN])
+        Zk_te = np.hstack([emb[n]["Zte"] for n in KERNEL_CHAN])
+
+        mean = LinearEmbeddingMean().fit(Zm_tr, y_tr, size=None)
+        r_tr = y_tr - mean.predict(Zm_tr, size=None)
+        prior_var = float(np.var(r_tr))
+
+        base_cuts, slices, off = [], [], 0
+        for n in KERNEL_CHAN:
+            dd = emb[n]["Ztr"].shape[1]
+            base_cuts.append(cutoff_for_neighbors(
+                emb[n]["Ztr"], emb[n]["Zte"], K, dim=dd, data_id_tr=cat_tr,
+                data_id_te=cat_te, sample=5000))
+            slices.append((off, off + dd)); off += dd
+        base_cuts = np.array(base_cuts)
+
+        d_add, nb_add, iso_add = support_stats(Zk_tr, cat_tr, base_cuts, slices, "union")
+        d_nat, nb_nat, iso_nat = support_stats(Zk_tr, cat_tr, base_cuts, slices, "inter")
+        print(f"[prod] seed {seed}: additive(union) density {d_add:.4e} "
+              f"(median {nb_add:.0f} nbrs, {iso_add:.1%} isolated)")
+        print(f"[prod] seed {seed}: product(inter) UNRESCALED density {d_nat:.4e} "
+              f"(median {nb_nat:.0f} nbrs, {iso_nat:.1%} isolated) "
+              f"-> {d_add / max(d_nat, 1e-12):.0f}x sparser than additive")
+
+        lo, hi = 1.0, 8.0                        # widen both channels until densities match
+        for _ in range(26):
+            mid = 0.5 * (lo + hi)
+            dm, _, _ = support_stats(Zk_tr, cat_tr, base_cuts * mid, slices, "inter")
+            if dm > d_add:
+                hi = mid
+            else:
+                lo = mid
+        s = 0.5 * (lo + hi)
+        cuts = base_cuts * s
+        d_p, nb_p, iso_p = support_stats(Zk_tr, cat_tr, cuts, slices, "inter")
+        print(f"[prod] seed {seed}: matched at scale x{s:.3f} -> density {d_p:.4e} "
+              f"(median {nb_p:.0f} nbrs, {iso_p:.1%} isolated)")
+
+        specs = [ChannelSpec(sl[0], sl[1], float(c)) for sl, c in zip(slices, cuts)]
+        kern = ProductWendlandKernel(specs, device="cpu", dtype="float64")
+
+        cl = Client(n_workers=4, threads_per_worker=1, processes=False,
+                    dashboard_address=None, silence_logs=50)
+        t0 = time.time()
+        try:
+            Xs, ys, _ = sort_by_category(with_category_tag(Zk_tr, cat_tr), r_tr)
+            with SolveWarningCounter() as wc:
+                gp, _ = build_gp(Xs, ys, None, None, cl, kernel_override=kern,
+                                 signal_var=[prior_var], jitter=JITTER, **SOLVE)
+                m_gp, v_gp = predict(gp, with_category_tag(Zk_te[sel], cat_te[sel]),
+                                     batch=200, variance=True)
+            del gp
+            release_gp(cl)
+        finally:
+            cl.close()
+        wc.report(n_evals=NTE, label=f"prod-s{seed}")
+
+        mu = mean.predict(Zm_te, size=None)[sel] + m_gp
+        err = y_te[sel] - mu
+        Dn = cdist(Zk_te[sel], Zk_tr)
+        Dn[cat_te[sel][:, None] != cat_tr[None, :]] = np.inf
+        dnn = Dn.min(axis=1)
+        D_tr, D_te = np.eye(ncat)[cat_tr], np.eye(ncat)[cat_te]
+        V_tr = np.hstack([np.ones((len(tr), 1)), np.log(size_tr)[:, None], D_tr[:, 1:]])
+        V_te = np.hstack([np.ones((len(te), 1)), np.log(size_te)[:, None], D_te[:, 1:]])
+        bv, *_ = np.linalg.lstsq(V_tr, np.log(r_tr ** 2 + 1e-8), rcond=None)
+        sd_cheap = np.exp(0.5 * (V_te @ bv))[sel]
+
+        np.savez(out, seed=seed, arm="product", rung="M1", y=y_te[sel], mu=mu, err=err,
+                 v_gp=v_gp, dnn=dnn, sd_cheap=sd_cheap, cat=cat_te[sel],
+                 cuts_cat=np.repeat(cuts[:, None], ncat, axis=1),
+                 cuts_glob=base_cuts, scale=s,
+                 dens_global=d_add, dens_percat=d_p, dens_natural=d_nat,
+                 med_nbrs=nb_p, isolated=iso_p, prior_var=prior_var,
+                 ols_r2=r2_score(y_te[sel], mean.predict(Zm_te, size=None)[sel]),
+                 n_warn=int(wc.total), cat_names=np.array(ds.category_names))
+        print(f"[prod] seed {seed}: GP_R2={r2_score(y_te[sel], mu):.4f} "
+              f"({time.time() - t0:.0f}s) -> {out}\n")
+
+
+if __name__ == "__main__":
+    main()
