@@ -1,0 +1,67 @@
+[data] loaded materialised cache cache/materialized_20000.pkl (20,000 molecules) -- skipped 20,000 random lmdb lookups
+      N   V(depth4)  pat/mol  frac_zero    density   purity   chance   lift
+------------------------------------------------------------------------------
+[wl-fit] 48409 raw labels -> 48409 kept (min_count=1) from 1000 sample mols in 1.3s; per-depth {1: 2361, 2: 9092, 3: 16023, 4: 20933}
+[wl] transformed (1000, 48409) (nnz=94,279, density=1.95e-03) in 1.4s; OOV 0.0% of occurrences
+   1000      20,933       23     0.9394  6.064e-02   0.4785   0.1713   2.79x
+[wl-fit] 86071 raw labels -> 86071 kept (min_count=1) from 2000 sample mols in 2.5s; per-depth {1: 3701, 2: 15751, 3: 28567, 4: 38052}
+[wl] transformed (2000, 86071) (nnz=180,837, density=1.05e-03) in 2.5s; OOV 0.0% of occurrences
+   2000      38,052       20     0.9422  5.784e-02   0.4737   0.1711   2.77x
+[wl-fit] 159685 raw labels -> 159685 kept (min_count=1) from 4000 sample mols in 5.2s; per-depth {1: 6054, 2: 28319, 3: 52996, 4: 72316}
+[wl] transformed (4000, 159685) (nnz=365,926, density=5.73e-04) in 5.5s; OOV 0.0% of occurrences
+   4000      72,316       20     0.9401  5.985e-02   0.4721   0.1717   2.75x
+[wl-fit]   vocab scan 5000/8000
+[wl-fit] 293916 raw labels -> 293916 kept (min_count=1) from 8000 sample mols in 10.3s; per-depth {1: 9654, 2: 50653, 3: 97538, 4: 136071}
+[wl] transformed (8000, 293916) (nnz=726,243, density=3.09e-04) in 10.2s; OOV 0.0% of occurrences
+   8000     136,071       20     0.9418  5.817e-02   0.4634   0.1695   2.73x
+[wl-fit]   vocab scan 5000/16000
+[wl-fit]   vocab scan 10000/16000
+[wl-fit]   vocab scan 15000/16000
+[wl-fit] 544093 raw labels -> 544093 kept (min_count=1) from 16000 sample mols in 20.7s; per-depth {1: 15330, 2: 90429, 3: 180275, 4: 258059}
+[wl] transformed (16000, 544093) (nnz=1,459,707, density=1.68e-04) in 20.8s; OOV 0.0% of occurrences
+  16000     258,059       20     0.9411  5.892e-02   0.4698   0.1684   2.79x
+
+  density ~ 0.0629 * N^-0.007   (R^2 of log-log fit 0.1742)
+    extrapolated density at N=   20,000: 5.837e-02   nnz=2.33e+07   (DENSER than the Wendland kernel at 200k, 1.67e-03)
+    extrapolated density at N=  200,000: 5.737e-02   nnz=2.29e+09   (DENSER than the Wendland kernel at 200k, 1.67e-03)
+    extrapolated density at N=1,000,000: 5.669e-02   nnz=5.67e+10   (DENSER than the Wendland kernel at 200k, 1.67e-03)
+
+  purity across the ladder: [0.4785 0.4737 0.4721 0.4634 0.4698]  (falling)
+
+  CAVEAT: extrapolating a power law two decades past the data is a
+  hypothesis, not a measurement. It is cheap to check directly at 200k --
+  featurisation only, no GP, no solve.
+########## DEPTH 5 ##########
+[data] loaded materialised cache cache/materialized_20000.pkl (20,000 molecules) -- skipped 20,000 random lmdb lookups
+      N   V(depth5)  pat/mol  frac_zero    density   purity   chance   lift
+------------------------------------------------------------------------------
+[wl-fit] 71959 raw labels -> 71959 kept (min_count=1) from 1000 sample mols in 1.4s; per-depth {1: 2361, 2: 9092, 3: 16023, 4: 20933, 5: 23550}
+[wl] transformed (1000, 71959) (nnz=125,046, density=1.74e-03) in 1.4s; OOV 0.0% of occurrences
+   1000      23,550       23     0.9733  2.674e-02   0.6869   0.1713   4.01x
+[wl-fit] 129350 raw labels -> 129350 kept (min_count=1) from 2000 sample mols in 2.6s; per-depth {1: 3701, 2: 15751, 3: 28567, 4: 38052, 5: 43279}
+[wl] transformed (2000, 129350) (nnz=239,698, density=9.27e-04) in 2.7s; OOV 0.0% of occurrences
+   2000      43,279       20     0.9745  2.548e-02   0.6507   0.1711   3.80x
+[wl-fit] 242964 raw labels -> 242964 kept (min_count=1) from 4000 sample mols in 5.3s; per-depth {1: 6054, 2: 28319, 3: 52996, 4: 72316, 5: 83279}
+[wl] transformed (4000, 242964) (nnz=485,609, density=5.00e-04) in 5.5s; OOV 0.0% of occurrences
+   4000      83,279       20     0.9734  2.662e-02   0.6465   0.1717   3.76x
+[wl-fit]   vocab scan 5000/8000
+[wl-fit] 452341 raw labels -> 452341 kept (min_count=1) from 8000 sample mols in 11.1s; per-depth {1: 9654, 2: 50653, 3: 97538, 4: 136071, 5: 158425}
+[wl] transformed (8000, 452341) (nnz=963,354, density=2.66e-04) in 11.2s; OOV 0.0% of occurrences
+   8000     158,425       20     0.9740  2.604e-02   0.6256   0.1695   3.69x
+[wl-fit]   vocab scan 5000/16000
+[wl-fit]   vocab scan 10000/16000
+[wl-fit]   vocab scan 15000/16000
+[wl-fit] 849276 raw labels -> 849276 kept (min_count=1) from 16000 sample mols in 22.1s; per-depth {1: 15330, 2: 90429, 3: 180275, 4: 258059, 5: 305183}
+[wl] transformed (16000, 849276) (nnz=1,937,244, density=1.43e-04) in 21.8s; OOV 0.0% of occurrences
+  16000     305,183       20     0.9743  2.574e-02   0.6399   0.1684   3.80x
+
+  density ~ 0.0279 * N^-0.008   (R^2 of log-log fit 0.1657)
+    extrapolated density at N=   20,000: 2.580e-02   nnz=1.03e+07   (DENSER than the Wendland kernel at 200k, 1.67e-03)
+    extrapolated density at N=  200,000: 2.534e-02   nnz=1.01e+09   (DENSER than the Wendland kernel at 200k, 1.67e-03)
+    extrapolated density at N=1,000,000: 2.503e-02   nnz=2.50e+10   (DENSER than the Wendland kernel at 200k, 1.67e-03)
+
+  purity across the ladder: [0.6869 0.6507 0.6465 0.6256 0.6399]  (falling)
+
+  CAVEAT: extrapolating a power law two decades past the data is a
+  hypothesis, not a measurement. It is cheap to check directly at 200k --
+  featurisation only, no GP, no solve.

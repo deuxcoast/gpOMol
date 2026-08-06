@@ -40,3 +40,7 @@ gp/*.png
 scripts/**/*.png
 scripts/*.png
 descriptor_eval/**/*.png
+
+# per-seed PLS embedding caches (derived; ~5 MB each, rebuilt in ~7 min by
+# scripts/percat_radius.py load_or_build_embeddings)
+cache/emb_*.npz

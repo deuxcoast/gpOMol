@@ -1,4 +1,4 @@
-"""Does depth-3 WL overlap get SPARSER with N, and how fast?
+"""Does the deepest WL block get SPARSER with N, and fast enough to be viable at 200k?
 
 The single-N measurement is not decidable on its own. At 4k molecules the depth-3 linear
 kernel has density 1.75e-1 -- 7.5x DENSER than the radius kernel we already run at 20k
@@ -21,15 +21,22 @@ at small N would import the small-N overlap structure into every larger rung and
 manufacture the trend being tested.
 """
 import os
+import sys
 import numpy as np
 import scipy.sparse as sp
 from sklearn.model_selection import train_test_split
 
 SCR = os.path.dirname(os.path.abspath(__file__))
 LADDER = (1000, 2000, 4000, 8000, 16000)
-DEPTH, BOND_MULT = 3, 1.1
-# what we actually run today, from sparsity_report at 20k (arm K=200, wl channel)
+DEPTH = int(sys.argv[1]) if len(sys.argv) > 1 else 3   # deepest WL block to profile
+BOND_MULT = 1.1
+# The comparison target is the Wendland kernel we actually run. At 200k (the real run,
+# median 60 in-support neighbours) the measured density is 1.667e-3; at 20k the graph-only
+# arm sits near 1e-2. The radius policy holds neighbour COUNT fixed, so Wendland density
+# falls as ~1/N by construction -- which is exactly the property the WL subtree kernel has
+# no knob for, and the reason this ladder decides whether it is viable at scale.
 CURRENT_DENSITY, CURRENT_K = 2.344e-2, 200
+WENDLAND_AT_200K = 1.667e-3
 
 
 def main():
@@ -43,7 +50,7 @@ def main():
     rng = np.random.default_rng(0)
     order = rng.permutation(len(tr))          # nested subsamples: rung n is a prefix
 
-    print(f"{'N':>7} {'V(depth3)':>11} {'pat/mol':>8} {'frac_zero':>10} {'density':>10} "
+    print(f"{'N':>7} {f'V(depth{DEPTH})':>11} {'pat/mol':>8} {'frac_zero':>10} {'density':>10} "
           f"{'purity':>8} {'chance':>8} {'lift':>6}")
     print("-" * 78)
     rows = []
@@ -54,7 +61,7 @@ def main():
         F = SparseWLFeaturizer(depth=DEPTH, min_count=1, cutoff_mult=BOND_MULT,
                               perceiver="ase", normalize=False).fit(atoms)
         Phi = F.transform(atoms, chunk=500)
-        lo = F.offsets_[3]
+        lo = F.offsets_[DEPTH]
         B = Phi[:, lo:F.ncols_]                       # depth-3 block only
         B.data[:] = 1.0                               # presence, not multiplicity
         K = (B @ B.T).tocoo()
@@ -81,8 +88,8 @@ def main():
         d = np.exp(loga) * target ** b
         print(f"    extrapolated density at N={target:>9,}: {d:.3e}   "
               f"nnz={d*target**2:.2e}   "
-              f"({'SPARSER' if d < CURRENT_DENSITY else 'denser'} than our K={CURRENT_K} "
-              f"radius kernel at {CURRENT_DENSITY:.2e})")
+              f"({'SPARSER' if d < WENDLAND_AT_200K else 'DENSER'} than the Wendland "
+              f"kernel at 200k, {WENDLAND_AT_200K:.2e})")
     P = np.array([r[2] for r in rows], float)
     print(f"\n  purity across the ladder: {np.round(P, 4)}  "
           f"({'rising' if P[-1] > P[0] else 'falling'})")
