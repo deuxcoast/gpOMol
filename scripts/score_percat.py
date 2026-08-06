@@ -24,7 +24,7 @@ from scipy.stats import spearmanr
 from sklearn.metrics import r2_score
 
 OUT = sys.argv[1] if len(sys.argv) > 1 else "cache/percat"
-ARMS = ("global", "percat", "matched", "product")
+ARMS = ("global", "percat", "matched", "product", "prodpercat")
 
 
 def rank(s, aerr, frac=0.05):

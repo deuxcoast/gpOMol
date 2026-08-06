@@ -63,11 +63,17 @@ class ProductWendlandKernel:
     that channel blocks MULTIPLY instead of summing, and there is a single signal
     variance because the diagonal is a product of ones rather than a sum."""
 
-    def __init__(self, channels, cats=None, device="cpu", dtype="float64"):
+    def __init__(self, channels, cats=None, device="cpu", dtype="float64",
+                 cutoffs_by_cat=None):
         self.channels = [c if isinstance(c, ChannelSpec) else ChannelSpec(*c)
                          for c in channels]
         self.device, self.dtype = device, dtype
         self._total_dim = self.channels[-1].stop
+        # (C, n_categories) or None. When set, each channel's radius is looked up by the
+        # ROW's category, which is exact rather than approximate: every entry surviving
+        # the cross-category mask has cats1 == cats2, and every entry that does not is
+        # zeroed below regardless of which radius produced it.
+        self.cutoffs_by_cat = cutoffs_by_cat
 
     def __call__(self, x1, x2, hps):
         import torch
@@ -81,11 +87,16 @@ class ProductWendlandKernel:
 
         dev = self.device
         Kp = torch.ones((n1, n2), dtype=td, device=dev)
-        for ch in self.channels:
+        for ci, ch in enumerate(self.channels):
             a = torch.as_tensor(x1[:, ch.start:ch.stop], dtype=td, device=dev)
             b = torch.as_tensor(x2[:, ch.start:ch.stop], dtype=td, device=dev)
             D = torch.cdist(a, b, compute_mode="donot_use_mm_for_euclid_dist")
-            t = torch.clamp(D / float(ch.cutoff), 0.0, 1.0)
+            if self.cutoffs_by_cat is None:
+                cut = float(ch.cutoff)
+            else:
+                cut = torch.as_tensor(self.cutoffs_by_cat[ci][cats1], dtype=td,
+                                      device=dev).view(-1, 1)
+            t = torch.clamp(D / cut, 0.0, 1.0)
             Kc = torch.where(t < 1.0, _wendland32(t), torch.zeros_like(t))
             Kp = Kp * Kc                       # INTERSECTION support
         Kp = Kp * float(hps[0])
@@ -97,12 +108,17 @@ class ProductWendlandKernel:
 
 def support_stats(Ztr, cat_tr, cuts, slices, mode, sample=5000, seed=0):
     """Realised density, median neighbours per row and isolated fraction.
-    mode='union' reproduces the additive kernel's support, 'inter' the product's."""
+
+    mode='union' reproduces the additive kernel's support, 'inter' the product's.
+    ``cuts`` is either (C,) one radius per channel, or (C, n_categories) for the
+    per-category variant, in which case the ROW's category selects the radius."""
     rng = np.random.default_rng(seed)
     idx = rng.choice(len(Ztr), size=min(sample, len(Ztr)), replace=False)
+    cuts = np.asarray(cuts)
     nz = None
     for c, (s, e) in enumerate(slices):
-        near = cdist(Ztr[idx, s:e], Ztr[:, s:e]) < cuts[c]
+        thr = cuts[c] if cuts.ndim == 1 else cuts[c][cat_tr[idx]][:, None]
+        near = cdist(Ztr[idx, s:e], Ztr[:, s:e]) < thr
         nz = near if nz is None else (nz | near if mode == "union" else nz & near)
     nz &= cat_tr[idx][:, None] == cat_tr[None, :]
     deg = nz.sum(axis=1) - 1                    # drop the self entry
@@ -114,6 +130,13 @@ def main():
     ap.add_argument("--seeds", type=int, nargs="+", default=[42, 7, 123])
     ap.add_argument("--emb-dir", default="cache")
     ap.add_argument("--out", default="cache/product")
+    ap.add_argument("--percat", action="store_true",
+                    help="per-category radii INSIDE the product, i.e. combine the two "
+                         "levers that each moved the UQ gap on their own (+0.076 for "
+                         "intersection support, +0.024 for per-category allocation). "
+                         "They act on different things -- one changes WHAT COUNTS as a "
+                         "neighbour, the other WHERE support is allocated -- so whether "
+                         "they add, overlap or fight is an empirical question.")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
 
@@ -131,7 +154,8 @@ def main():
     ncat = len(ds.category_names)
 
     for seed in a.seeds:
-        out = os.path.join(a.out, f"product_s{seed}.npz")
+        tag = "prodpercat" if a.percat else "product"
+        out = os.path.join(a.out, f"{tag}_s{seed}.npz")
         if os.path.exists(out):
             print(f"[prod] {out} exists"); continue
 
@@ -160,8 +184,14 @@ def main():
                 data_id_te=cat_te, sample=5000))
             slices.append((off, off + dd)); off += dd
         base_cuts = np.array(base_cuts)
+        glob_cuts = base_cuts.copy()
+        if a.percat:
+            from percat_radius import per_category_cutoffs
+            pc = [per_category_cutoffs(emb[n]["Ztr"], emb[n]["Zte"], cat_tr, cat_te,
+                                       ncat)[0] for n in KERNEL_CHAN]
+            base_cuts = np.array(pc)                 # (C, ncat)
 
-        d_add, nb_add, iso_add = support_stats(Zk_tr, cat_tr, base_cuts, slices, "union")
+        d_add, nb_add, iso_add = support_stats(Zk_tr, cat_tr, glob_cuts, slices, "union")
         d_nat, nb_nat, iso_nat = support_stats(Zk_tr, cat_tr, base_cuts, slices, "inter")
         print(f"[prod] seed {seed}: additive(union) density {d_add:.4e} "
               f"(median {nb_add:.0f} nbrs, {iso_add:.1%} isolated)")
@@ -183,8 +213,15 @@ def main():
         print(f"[prod] seed {seed}: matched at scale x{s:.3f} -> density {d_p:.4e} "
               f"(median {nb_p:.0f} nbrs, {iso_p:.1%} isolated)")
 
-        specs = [ChannelSpec(sl[0], sl[1], float(c)) for sl, c in zip(slices, cuts)]
-        kern = ProductWendlandKernel(specs, device="cpu", dtype="float64")
+        if a.percat:
+            specs = [ChannelSpec(sl[0], sl[1], float(np.median(c)))
+                     for sl, c in zip(slices, cuts)]
+            kern = ProductWendlandKernel(specs, device="cpu", dtype="float64",
+                                         cutoffs_by_cat=cuts)
+        else:
+            specs = [ChannelSpec(sl[0], sl[1], float(c))
+                     for sl, c in zip(slices, cuts)]
+            kern = ProductWendlandKernel(specs, device="cpu", dtype="float64")
 
         cl = Client(n_workers=4, threads_per_worker=1, processes=False,
                     dashboard_address=None, silence_logs=50)
@@ -213,15 +250,16 @@ def main():
         bv, *_ = np.linalg.lstsq(V_tr, np.log(r_tr ** 2 + 1e-8), rcond=None)
         sd_cheap = np.exp(0.5 * (V_te @ bv))[sel]
 
-        np.savez(out, seed=seed, arm="product", rung="M1", y=y_te[sel], mu=mu, err=err,
+        np.savez(out, seed=seed, arm=tag, rung="M1", y=y_te[sel], mu=mu, err=err,
                  v_gp=v_gp, dnn=dnn, sd_cheap=sd_cheap, cat=cat_te[sel],
-                 cuts_cat=np.repeat(cuts[:, None], ncat, axis=1),
-                 cuts_glob=base_cuts, scale=s,
+                 cuts_cat=(cuts if cuts.ndim == 2 else
+                           np.repeat(cuts[:, None], ncat, axis=1)),
+                 cuts_glob=glob_cuts, scale=s,
                  dens_global=d_add, dens_percat=d_p, dens_natural=d_nat,
                  med_nbrs=nb_p, isolated=iso_p, prior_var=prior_var,
                  ols_r2=r2_score(y_te[sel], mean.predict(Zm_te, size=None)[sel]),
                  n_warn=int(wc.total), cat_names=np.array(ds.category_names))
-        print(f"[prod] seed {seed}: GP_R2={r2_score(y_te[sel], mu):.4f} "
+        print(f"[prod] seed {seed} {tag}: GP_R2={r2_score(y_te[sel], mu):.4f} "
               f"({time.time() - t0:.0f}s) -> {out}\n")
 
 
