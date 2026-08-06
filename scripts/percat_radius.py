@@ -46,6 +46,7 @@ from sklearn.metrics import r2_score
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from wl_gp2scale.kernel import AdditiveWendlandKernel, ChannelSpec  # noqa: E402
+from wl_gp2scale.cutoff import _warn_block_memory  # noqa: E402
 
 N, NTE, JITTER, K = 20_000, 800, 4.30, 200
 KERNEL_CHAN = ("wl", "geom")
@@ -160,13 +161,21 @@ def per_category_cutoffs(Ztr, Zte, cat_tr, cat_te, ncat, target=K):
 
 
 def train_density(Ztr, cat_tr, cuts_by_cat, chan_slices, sample=5000, seed=0):
-    """Realised fraction of non-zero entries, over a sampled band of rows."""
+    """Realised fraction of non-zero entries, over a sampled band of rows.
+
+    ``sample`` is NOT cosmetic at scale: each channel materialises a dense
+    ``(sample, n_train)`` float64 block ON THE DRIVER -- 0.6 GB at 20k but 6.4 GB at
+    200k, and the previous channel's block is still alive while the next one is being
+    allocated. Callers must pass ``--diag-sample`` through; the 5000 default is a 20k
+    default. ``del D`` bounds the peak to one block rather than two."""
     rng = np.random.default_rng(seed)
     idx = rng.choice(len(Ztr), size=min(sample, len(Ztr)), replace=False)
+    _warn_block_memory(len(idx), len(Ztr), "train_density")
     nz = np.zeros((len(idx), len(Ztr)), bool)
     for c, (s, e) in enumerate(chan_slices):
         D = cdist(Ztr[idx, s:e], Ztr[:, s:e])
         nz |= D < cuts_by_cat[c][cat_tr[idx]][:, None]
+        del D
     nz &= cat_tr[idx][:, None] == cat_tr[None, :]
     return float(nz.mean()), float(np.median(nz.sum(axis=1)))
 
@@ -219,7 +228,17 @@ def main():
         tag = a.arm + ("" if a.mean == "M1" else "-M4")
         out = os.path.join(a.out, f"{tag}_s{seed}.npz")
         if os.path.exists(out):
-            print(f"[percat] {out} exists, skipping")
+            # see product_kernel.py: the filename has no N in it, so a 40k shakedown and
+            # a 200k run collide in one --out and the 200k run silently no-ops
+            prev = np.load(out, allow_pickle=True)
+            n_prev = int(prev["n"]) if "n" in prev.files else None
+            if n_prev is not None and n_prev != a.n:
+                raise SystemExit(
+                    f"[percat] ABORT: {out} already holds an n={n_prev:,} result but "
+                    f"this run is n={a.n:,}. Use a different --out (e.g. "
+                    f"cache/product_{a.n // 1000}k) or delete the old file."
+                )
+            print(f"[percat] {out} exists (n={n_prev if n_prev else '?'}), skipping")
             continue
 
         tr, te = train_test_split(idx, test_size=0.2, random_state=seed)
@@ -251,31 +270,44 @@ def main():
             dd = emb[n]["Ztr"].shape[1]
             cg = cutoff_for_neighbors(emb[n]["Ztr"], emb[n]["Zte"], K, dim=dd,
                                       data_id_tr=cat_tr, data_id_te=cat_te, sample=a.diag_sample)
-            cc, sh = per_category_cutoffs(emb[n]["Ztr"], emb[n]["Zte"], cat_tr, cat_te,
-                                          ncat)
+            # The global arm DISCARDS these (cuts_cat is overwritten below), and at 200k
+            # per_category_cutoffs is a ~2 GB dense block per channel for the largest
+            # families plus a partition copy. Do not pay for a result we throw away.
+            if a.arm == "global":
+                cc, sh = np.zeros(ncat), {}
+            else:
+                cc, sh = per_category_cutoffs(emb[n]["Ztr"], emb[n]["Zte"], cat_tr,
+                                              cat_te, ncat)
             cuts_glob.append(cg); cuts_cat.append(cc); shorts.update(sh)
             specs.append(ChannelSpec(off, off + dd, float(cg)))
             slices.append((off, off + dd)); off += dd
         cuts_cat = np.array(cuts_cat)
 
         cuts_global_bcast = np.array([[c] * ncat for c in cuts_glob])
-        dens_g, nbr_g = train_density(Zk_tr, cat_tr, cuts_global_bcast, slices)
+        dens_g, nbr_g = train_density(Zk_tr, cat_tr, cuts_global_bcast, slices,
+                                      sample=a.diag_sample)
         if a.arm == "global":                 # baseline: one cutoff everywhere
             cuts_cat = cuts_global_bcast
-        dens_p, nbr_p = train_density(Zk_tr, cat_tr, cuts_cat, slices)
+        # for the global arm this arm's radii ARE the global radii, so the second pass
+        # would recompute an identical number at full cost
+        dens_p, nbr_p = ((dens_g, nbr_g) if a.arm == "global" else
+                         train_density(Zk_tr, cat_tr, cuts_cat, slices,
+                                       sample=a.diag_sample))
         scale = 1.0
         if a.arm == "matched":
             lo, hi = 0.3, 3.0
             for _ in range(24):                     # bisect on one global multiplier
                 mid = 0.5 * (lo + hi)
-                dm, _ = train_density(Zk_tr, cat_tr, cuts_cat * mid, slices)
+                dm, _ = train_density(Zk_tr, cat_tr, cuts_cat * mid, slices,
+                                      sample=a.diag_sample)
                 if dm > dens_g:
                     hi = mid
                 else:
                     lo = mid
             scale = 0.5 * (lo + hi)
             cuts_cat = cuts_cat * scale
-            dens_p, nbr_p = train_density(Zk_tr, cat_tr, cuts_cat, slices)
+            dens_p, nbr_p = train_density(Zk_tr, cat_tr, cuts_cat, slices,
+                                          sample=a.diag_sample)
         print(f"[percat] seed {seed} arm={tag}: global density {dens_g:.4e} "
               f"(median {nbr_g:.0f} nbrs) | this arm {dens_p:.4e} "
               f"(median {nbr_p:.0f})" + (f"  [rescaled x{scale:.3f}]"
@@ -301,11 +333,18 @@ def main():
         t0 = time.time()
         try:
             Xs, ys, _ = sort_by_category(with_category_tag(Zk_tr, cat_tr), r_tr)
+            print(f"[percat] seed {seed}: building the GP on {len(Xs):,} train rows "
+                  f"({a.workers} workers, kernel on {a.device}) ...", flush=True)
             with SolveWarningCounter() as wc:
+                tb = time.time()
                 gp, _ = build_gp(Xs, ys, None, None, cl, kernel_override=kern,
                                  signal_var=[prior_var / C] * C, jitter=JITTER, **SOLVE)
+                print(f"[percat] seed {seed}: GP built in {time.time() - tb:.0f}s. Now "
+                      f"{a.nte} posterior variances = {a.nte} SEPARATE LINEAR SOLVES "
+                      f"against the full system -- the dominant cost at this N.",
+                      flush=True)
                 m_gp, v_gp = predict(gp, with_category_tag(Zk_te[sel], cat_te[sel]),
-                                     batch=200, variance=True)
+                                     batch=100, variance=True, verbose=True)
             del gp
             release_gp(cl)
         finally:
@@ -324,7 +363,8 @@ def main():
         bv, *_ = np.linalg.lstsq(V_tr, np.log(r_tr ** 2 + 1e-8), rcond=None)
         sd_cheap = np.exp(0.5 * (V_te @ bv))[sel]
 
-        np.savez(out, seed=seed, rung=a.mean, arm=tag, y=y_te[sel], mu=mu, err=err,
+        np.savez(out, seed=seed, rung=a.mean, arm=tag, n=a.n, nte=a.nte,
+                 diag_sample=a.diag_sample, y=y_te[sel], mu=mu, err=err,
                  v_gp=v_gp, dnn=dnn, sd_cheap=sd_cheap, cat=cat_te[sel],
                  cuts_cat=cuts_cat, cuts_glob=np.array(cuts_glob), scale=scale,
                  dens_global=dens_g, dens_percat=dens_p, prior_var=prior_var,

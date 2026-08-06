@@ -505,6 +505,7 @@ def predict(gp, X_te, batch=None, variance=True, verbose=False):
     n = len(X_te)
     bs = int(batch) if batch else n
     ms, vs = [], []
+    t0 = time.time()
     for s in range(0, n, bs):
         xb = X_te[s : s + bs]
         ms.append(_first(gp.posterior_mean(xb), ["f(x)", "m(x)"]))
@@ -514,7 +515,16 @@ def predict(gp, X_te, batch=None, variance=True, verbose=False):
                        ["v(x)", "S(x)", "variance"])
             )
         if verbose:
-            print(f"[predict]   {min(s + bs, n)}/{n}")
+            # This loop is where a 200k run spends most of its wall time (one solve per
+            # test point), and it used to print a bare counter -- so there was no way to
+            # tell a slow run from a stalled one, or to decide at batch 1 whether the
+            # remaining batches fit in the allocation. Report the rate and the ETA, which
+            # is the number you actually act on.
+            done = min(s + bs, n)
+            el = time.time() - t0
+            rate = el / max(done, 1)
+            print(f"[predict]   {done}/{n}  elapsed {el / 60:.1f} min  "
+                  f"{rate:.2f} s/pt  ETA {(n - done) * rate / 60:.1f} min", flush=True)
     m = np.concatenate(ms)
     v = np.maximum(np.concatenate(vs), 0.0) if variance else np.full(n, np.nan)
     return m, v
