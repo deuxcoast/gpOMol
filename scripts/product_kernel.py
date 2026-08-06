@@ -184,7 +184,21 @@ def main():
         tag = ("prodpercat" if a.percat else "product") + ("" if a.mean == "M1" else "-M4")
         out = os.path.join(a.out, f"{tag}_s{seed}.npz")
         if os.path.exists(out):
-            print(f"[prod] {out} exists"); continue
+            # The filename carries the ARM and SEED but not N, so a cheap 40k shakedown
+            # and the real 200k run collide in one --out dir: the 200k run would skip,
+            # and the scorer would report the 40k numbers as the 200k result. Cheap to
+            # detect, expensive to notice afterwards.
+            prev = np.load(out, allow_pickle=True)
+            n_prev = int(prev["n"]) if "n" in prev.files else None
+            if n_prev is not None and n_prev != a.n:
+                raise SystemExit(
+                    f"[prod] ABORT: {out} already holds an n={n_prev:,} result but this "
+                    f"run is n={a.n:,}. These do not belong in one --out dir -- the "
+                    f"scorer cannot tell them apart. Use a different --out (e.g. "
+                    f"cache/product_{a.n // 1000}k) or delete the old file."
+                )
+            print(f"[prod] {out} exists (n={n_prev if n_prev else '?'}), skipping")
+            continue
 
         tr, te = train_test_split(idx, test_size=0.2, random_state=seed)
         y_tr, y_te = ds.y[tr], ds.y[te]
@@ -229,7 +243,14 @@ def main():
                                        ncat)[0] for n in KERNEL_CHAN]
             base_cuts = np.array(pc)                 # (C, ncat)
 
+        gb = a.diag_sample * len(Zk_tr) * 8 / 1e9
+        print(f"[prod] seed {seed}: {len(tr):,} train / {len(te):,} test; computing "
+              f"{len(KERNEL_CHAN)} distance bands for the radius bisection "
+              f"({a.diag_sample} x {len(Zk_tr):,} = {gb:.1f} GB each, on the DRIVER) ...",
+              flush=True)
+        tband = time.time()
         bidx, bands = distance_bands(Zk_tr, slices, sample=a.diag_sample)
+        print(f"[prod] seed {seed}: bands ready in {time.time() - tband:.0f}s", flush=True)
         d_add, nb_add, iso_add = support_stats(bidx, bands, cat_tr, glob_cuts, "union")
         d_nat, nb_nat, iso_nat = support_stats(bidx, bands, cat_tr, base_cuts, "inter")
         print(f"[prod] seed {seed}: additive(union) density {d_add:.4e} "
@@ -286,11 +307,18 @@ def main():
         t0 = time.time()
         try:
             Xs, ys, _ = sort_by_category(with_category_tag(Zk_tr, cat_tr), r_tr)
+            print(f"[prod] seed {seed}: building the GP on {len(Xs):,} train rows "
+                  f"({a.workers} workers, kernel on {a.device}) ...", flush=True)
             with SolveWarningCounter() as wc:
+                tb = time.time()
                 gp, _ = build_gp(Xs, ys, None, None, cl, kernel_override=kern,
                                  signal_var=[prior_var], jitter=JITTER, **SOLVE)
+                print(f"[prod] seed {seed}: GP built in {time.time() - tb:.0f}s. Now "
+                      f"{a.nte} posterior variances = {a.nte} SEPARATE LINEAR SOLVES "
+                      f"against the full system -- the dominant cost at this N.",
+                      flush=True)
                 m_gp, v_gp = predict(gp, with_category_tag(Zk_te[sel], cat_te[sel]),
-                                     batch=200, variance=True)
+                                     batch=100, variance=True, verbose=True)
             del gp
             release_gp(cl)
         finally:
@@ -308,7 +336,8 @@ def main():
         bv, *_ = np.linalg.lstsq(V_tr, np.log(r_tr ** 2 + 1e-8), rcond=None)
         sd_cheap = np.exp(0.5 * (V_te @ bv))[sel]
 
-        np.savez(out, seed=seed, arm=tag, rung=a.mean, y=y_te[sel], mu=mu, err=err,
+        np.savez(out, seed=seed, arm=tag, rung=a.mean, n=a.n, nte=a.nte,
+                 diag_sample=a.diag_sample, y=y_te[sel], mu=mu, err=err,
                  v_gp=v_gp, dnn=dnn, sd_cheap=sd_cheap, cat=cat_te[sel],
                  cuts_cat=(cuts if cuts.ndim == 2 else
                            np.repeat(cuts[:, None], ncat, axis=1)),

@@ -44,6 +44,30 @@ def main():
     arms = [a for a in ARMS if any((a, s) in A for s in seeds)]
     print(f"loaded {len(A)} arms: {arms} x seeds {seeds}\n")
 
+    # EVERY NUMBER BELOW IS A DIFFERENCE BETWEEN ARMS, so arms run at different N (or a
+    # different test-set size) are not comparable. The result filenames carry only the
+    # arm and the seed, so a cheap shakedown at one N and the real run at another land
+    # in the same directory and difference cleanly against each other. Refuse instead.
+    cfg = {}
+    for (arm, s), d in A.items():
+        cfg[(arm, s)] = tuple(int(d[k]) if k in d.files else -1
+                              for k in ("n", "nte", "diag_sample"))
+    for k, v in sorted(cfg.items()):
+        if v[0] > 0:
+            print(f"    {k[0]:>12} s{k[1]:<4} n={v[0]:,}  nte={v[1]}  diag_sample={v[2]}")
+    known = {v for v in cfg.values() if v[0] > 0}
+    if len({v[0] for v in known}) > 1:
+        raise SystemExit(
+            f"\nABORT: these arms were run at DIFFERENT n: "
+            f"{sorted({v[0] for v in known})}. Every number this script prints is an "
+            f"arm-vs-arm difference, so mixing them produces a plausible wrong answer. "
+            f"Split them into separate --out directories."
+        )
+    if len(known) > 1:
+        print(f"\nWARNING: arms differ in nte/diag_sample: {sorted(known)}. Paired "
+              f"comparisons assume the same test points and the same support radii.")
+    print()
+
     print("=" * 104)
     print("ACCURACY AND SPARSITY")
     print("=" * 104)

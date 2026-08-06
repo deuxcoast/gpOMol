@@ -228,7 +228,17 @@ def main():
         tag = a.arm + ("" if a.mean == "M1" else "-M4")
         out = os.path.join(a.out, f"{tag}_s{seed}.npz")
         if os.path.exists(out):
-            print(f"[percat] {out} exists, skipping")
+            # see product_kernel.py: the filename has no N in it, so a 40k shakedown and
+            # a 200k run collide in one --out and the 200k run silently no-ops
+            prev = np.load(out, allow_pickle=True)
+            n_prev = int(prev["n"]) if "n" in prev.files else None
+            if n_prev is not None and n_prev != a.n:
+                raise SystemExit(
+                    f"[percat] ABORT: {out} already holds an n={n_prev:,} result but "
+                    f"this run is n={a.n:,}. Use a different --out (e.g. "
+                    f"cache/product_{a.n // 1000}k) or delete the old file."
+                )
+            print(f"[percat] {out} exists (n={n_prev if n_prev else '?'}), skipping")
             continue
 
         tr, te = train_test_split(idx, test_size=0.2, random_state=seed)
@@ -323,11 +333,18 @@ def main():
         t0 = time.time()
         try:
             Xs, ys, _ = sort_by_category(with_category_tag(Zk_tr, cat_tr), r_tr)
+            print(f"[percat] seed {seed}: building the GP on {len(Xs):,} train rows "
+                  f"({a.workers} workers, kernel on {a.device}) ...", flush=True)
             with SolveWarningCounter() as wc:
+                tb = time.time()
                 gp, _ = build_gp(Xs, ys, None, None, cl, kernel_override=kern,
                                  signal_var=[prior_var / C] * C, jitter=JITTER, **SOLVE)
+                print(f"[percat] seed {seed}: GP built in {time.time() - tb:.0f}s. Now "
+                      f"{a.nte} posterior variances = {a.nte} SEPARATE LINEAR SOLVES "
+                      f"against the full system -- the dominant cost at this N.",
+                      flush=True)
                 m_gp, v_gp = predict(gp, with_category_tag(Zk_te[sel], cat_te[sel]),
-                                     batch=200, variance=True)
+                                     batch=100, variance=True, verbose=True)
             del gp
             release_gp(cl)
         finally:
@@ -346,7 +363,8 @@ def main():
         bv, *_ = np.linalg.lstsq(V_tr, np.log(r_tr ** 2 + 1e-8), rcond=None)
         sd_cheap = np.exp(0.5 * (V_te @ bv))[sel]
 
-        np.savez(out, seed=seed, rung=a.mean, arm=tag, y=y_te[sel], mu=mu, err=err,
+        np.savez(out, seed=seed, rung=a.mean, arm=tag, n=a.n, nte=a.nte,
+                 diag_sample=a.diag_sample, y=y_te[sel], mu=mu, err=err,
                  v_gp=v_gp, dnn=dnn, sd_cheap=sd_cheap, cat=cat_te[sel],
                  cuts_cat=cuts_cat, cuts_glob=np.array(cuts_glob), scale=scale,
                  dens_global=dens_g, dens_percat=dens_p, prior_var=prior_var,
