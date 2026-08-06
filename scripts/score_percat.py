@@ -41,8 +41,17 @@ def main():
         d = np.load(f, allow_pickle=True)
         A[(str(d["arm"]), int(d["seed"]))] = d
     seeds = sorted({s for _, s in A})
-    arms = [a for a in ARMS if any((a, s) in A for s in seeds)]
-    print(f"loaded {len(A)} arms: {arms} x seeds {seeds}\n")
+    # ARMS only fixes the DISPLAY ORDER. Filtering by it silently dropped any arm whose
+    # tag was not hardcoded here -- a result file present on disk and absent from the
+    # table, which is the same class of failure as a missing arm: a complete-looking
+    # comparison that quietly omits one side. Anything unrecognised is appended, loudly.
+    present = {a for a, _ in A}
+    arms = [a for a in ARMS if a in present]
+    extra = sorted(present - set(ARMS))
+    if extra:
+        print(f"NOTE: arm(s) not in this script's ARMS list, appended: {extra}")
+    arms += extra
+    print(f"loaded {len(A)} result files: arms {arms} x seeds {seeds}\n")
 
     # EVERY NUMBER BELOW IS A DIFFERENCE BETWEEN ARMS, so arms run at different N (or a
     # different test-set size) are not comparable. The result filenames carry only the

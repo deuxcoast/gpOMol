@@ -157,6 +157,16 @@ def main():
                     help="rows in the driver-side density band. Each channel holds a "
                          "dense (sample x n_train) float64 block ON THE DRIVER: 0.6 GB at "
                          "20k but 6.4 GB at 200k, per channel. Lower to ~1000 at scale")
+    ap.add_argument("--kernel-chan", default="wl,geom",
+                    help="channels multiplied INTO THE KERNEL, comma separated. The "
+                         "default wl,geom is the pair the +0.068 result was measured "
+                         "on, but those two agree about neighbourhoods 12x more than "
+                         "independence -- they are one view described twice, which is "
+                         "why the intersection is only ~6x sparser than the union and "
+                         "caps how far the radii can be widened at matched density. "
+                         "Measured lift at the K=200 operating point: geom x wl 12.2, "
+                         "geom x strain 9.7, strain x wl 1.0 (independent). The prior "
+                         "MEAN always keeps all of MEAN_CHAN regardless of this flag.")
     ap.add_argument("--percat", action="store_true",
                     help="per-category radii INSIDE the product, i.e. combine the two "
                          "levers that each moved the UQ gap on their own (+0.076 for "
@@ -166,6 +176,18 @@ def main():
                          "they add, overlap or fight is an empirical question.")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
+
+    kchan = tuple(c.strip() for c in a.kernel_chan.split(",") if c.strip())
+    unknown = set(kchan) - set(MEAN_CHAN)
+    if unknown:
+        raise SystemExit(f"--kernel-chan: unknown channel(s) {sorted(unknown)}; "
+                         f"embeddings are built for {sorted(set(MEAN_CHAN))}")
+    if len(kchan) < 2:
+        raise SystemExit("--kernel-chan needs >=2 channels; a product of one channel "
+                         "is just that channel and the comparison is meaningless")
+    # Non-default channel sets get their own arm tag, or they overwrite the wl,geom
+    # results sitting in the same --out and the scorer cannot tell them apart.
+    chan_tag = "" if kchan == KERNEL_CHAN else "-" + "".join(kchan)
 
     from distributed import Client
     from fvgp.gp_lin_alg import _resolve_krylov_mode
@@ -181,7 +203,8 @@ def main():
     ncat = len(ds.category_names)
 
     for seed in a.seeds:
-        tag = ("prodpercat" if a.percat else "product") + ("" if a.mean == "M1" else "-M4")
+        tag = (("prodpercat" if a.percat else "product") + chan_tag
+               + ("" if a.mean == "M1" else "-M4"))
         out = os.path.join(a.out, f"{tag}_s{seed}.npz")
         if os.path.exists(out):
             # The filename carries the ARM and SEED but not N, so a cheap 40k shakedown
@@ -212,8 +235,8 @@ def main():
                                        scheduler_file=a.scheduler_file)
         Zm_tr = np.hstack([emb[n]["Ztr"] for n in MEAN_CHAN])
         Zm_te = np.hstack([emb[n]["Zte"] for n in MEAN_CHAN])
-        Zk_tr = np.hstack([emb[n]["Ztr"] for n in KERNEL_CHAN])
-        Zk_te = np.hstack([emb[n]["Zte"] for n in KERNEL_CHAN])
+        Zk_tr = np.hstack([emb[n]["Ztr"] for n in kchan])
+        Zk_te = np.hstack([emb[n]["Zte"] for n in kchan])
 
         msz = size_tr if a.mean == "M4" else None
         tsz = size_te if a.mean == "M4" else None
@@ -221,37 +244,59 @@ def main():
         r_tr = y_tr - mean.predict(Zm_tr, size=msz)
         prior_var = float(np.var(r_tr))
 
-        base_cuts, slices, off = [], [], 0
-        for n in KERNEL_CHAN:
+        # THE DENSITY TARGET IS THE BASELINE'S, NOT THIS ARM'S. Every arm is compared
+        # against the additive union over KERNEL_CHAN (percat_radius.py --arm global),
+        # so that union is the density to match -- otherwise a wl,strain arm matches
+        # itself to union(wl,strain), lands at a different density from the baseline,
+        # and the comparison is confounded by exactly the thing density matching exists
+        # to remove (RADIUS_CALIBRATION: R^2 and sigma*'s ranking BOTH rise with
+        # density). Identical to the old behaviour when kchan == KERNEL_CHAN.
+        need = tuple(dict.fromkeys(KERNEL_CHAN + kchan))       # ordered unique
+        cut_by, band_slices, off = {}, {}, 0
+        for n in need:
             dd = emb[n]["Ztr"].shape[1]
             # sample MUST match percat_radius.py's, not just for driver RAM (6.4 GB at
             # 200k with the old hardcoded 5000, plus a partition copy) but for the
             # EXPERIMENT: this is the global radius the additive baseline actually
-            # runs at, and glob_cuts below sets the density target the product arm
-            # bisects onto. A different sample here gives a different radius, so the
-            # two arms would no longer be density-matched -- silently, since each
-            # script's own numbers stay self-consistent.
-            base_cuts.append(cutoff_for_neighbors(
+            # runs at, and it sets the density target the product arm bisects onto. A
+            # different sample here gives a different radius, so the two arms would no
+            # longer be density-matched -- silently, since each script's own numbers
+            # stay self-consistent.
+            cut_by[n] = cutoff_for_neighbors(
                 emb[n]["Ztr"], emb[n]["Zte"], K, dim=dd, data_id_tr=cat_tr,
-                data_id_te=cat_te, sample=a.diag_sample))
-            slices.append((off, off + dd)); off += dd
-        base_cuts = np.array(base_cuts)
+                data_id_te=cat_te, sample=a.diag_sample)
+            band_slices[n] = (off, off + dd); off += dd
+
+        slices = [(0, 0)] * len(kchan)                # offsets into Zk_tr (kchan only)
+        off = 0
+        for i, n in enumerate(kchan):
+            dd = emb[n]["Ztr"].shape[1]
+            slices[i] = (off, off + dd); off += dd
+
+        base_cuts = np.array([cut_by[n] for n in kchan])
         glob_cuts = base_cuts.copy()
+        tgt_cuts = np.array([cut_by[n] for n in KERNEL_CHAN])
         if a.percat:
             from percat_radius import per_category_cutoffs
             pc = [per_category_cutoffs(emb[n]["Ztr"], emb[n]["Zte"], cat_tr, cat_te,
-                                       ncat)[0] for n in KERNEL_CHAN]
+                                       ncat)[0] for n in kchan]
             base_cuts = np.array(pc)                 # (C, ncat)
 
-        gb = a.diag_sample * len(Zk_tr) * 8 / 1e9
+        Zb_tr = np.hstack([emb[n]["Ztr"] for n in need])
+        gb = a.diag_sample * len(Zb_tr) * 8 / 1e9
         print(f"[prod] seed {seed}: {len(tr):,} train / {len(te):,} test; computing "
-              f"{len(KERNEL_CHAN)} distance bands for the radius bisection "
-              f"({a.diag_sample} x {len(Zk_tr):,} = {gb:.1f} GB each, on the DRIVER) ...",
+              f"{len(need)} distance bands {need} for the radius bisection "
+              f"({a.diag_sample} x {len(Zb_tr):,} = {gb:.1f} GB each, on the DRIVER) ...",
               flush=True)
         tband = time.time()
-        bidx, bands = distance_bands(Zk_tr, slices, sample=a.diag_sample)
+        bidx, all_bands = distance_bands(Zb_tr, [band_slices[n] for n in need],
+                                         sample=a.diag_sample)
+        del Zb_tr
+        by_name = dict(zip(need, all_bands))
+        bands = [by_name[n] for n in kchan]                    # this arm's channels
+        tgt_bands = [by_name[n] for n in KERNEL_CHAN]          # the baseline's channels
         print(f"[prod] seed {seed}: bands ready in {time.time() - tband:.0f}s", flush=True)
-        d_add, nb_add, iso_add = support_stats(bidx, bands, cat_tr, glob_cuts, "union")
+        d_add, nb_add, iso_add = support_stats(bidx, tgt_bands, cat_tr, tgt_cuts, "union")
         d_nat, nb_nat, iso_nat = support_stats(bidx, bands, cat_tr, base_cuts, "inter")
         print(f"[prod] seed {seed}: additive(union) density {d_add:.4e} "
               f"(median {nb_add:.0f} nbrs, {iso_add:.1%} isolated)")
@@ -270,7 +315,7 @@ def main():
         s = 0.5 * (lo + hi)
         cuts = base_cuts * s
         d_p, nb_p, iso_p = support_stats(bidx, bands, cat_tr, cuts, "inter")
-        del bands
+        del bands, tgt_bands, all_bands, by_name
         print(f"[prod] seed {seed}: matched at scale x{s:.3f} -> density {d_p:.4e} "
               f"(median {nb_p:.0f} nbrs, {iso_p:.1%} isolated)")
         # DENSITY MATCHING IS THE COMPARISON. The bracket [1, 8] was set at 20k, where
@@ -337,7 +382,8 @@ def main():
         sd_cheap = np.exp(0.5 * (V_te @ bv))[sel]
 
         np.savez(out, seed=seed, arm=tag, rung=a.mean, n=a.n, nte=a.nte,
-                 diag_sample=a.diag_sample, y=y_te[sel], mu=mu, err=err,
+                 diag_sample=a.diag_sample, kernel_chan=np.array(kchan),
+                 y=y_te[sel], mu=mu, err=err,
                  v_gp=v_gp, dnn=dnn, sd_cheap=sd_cheap, cat=cat_te[sel],
                  cuts_cat=(cuts if cuts.ndim == 2 else
                            np.repeat(cuts[:, None], ncat, axis=1)),
