@@ -59,21 +59,26 @@ FEAT = dict(depth=3, bond_mult=1.1, geom_top_k=10, pls=10, scaling="pareto",
             charge_key="lowdin_charges", diag_sample=5000)
 
 
-def load_or_build_embeddings(ds, tr, te, cat_tr, cat_te, seed, emb_dir):
+def load_or_build_embeddings(ds, tr, te, cat_tr, cat_te, seed, emb_dir,
+                             n_total=N, workers=4, scheduler_file=None):
     """Cached per-seed PLS embeddings. `target_neighbors=0` because every arm derives its
     OWN cutoffs downstream; caching a cutoff here would invite reusing the wrong one."""
     from wl_gp2scale.pipeline import build_channels
     os.makedirs(emb_dir, exist_ok=True)
-    path = os.path.join(emb_dir, f"emb_{N}_s{seed}.npz")
+    path = os.path.join(emb_dir, f"emb_{n_total}_s{seed}.npz")
     names = sorted(set(MEAN_CHAN) | set(KERNEL_CHAN))
     if os.path.exists(path):
         d = np.load(path, allow_pickle=True)
         print(f"[emb] reused {path}")
         return {n: {"Ztr": d[f"{n}_tr"], "Zte": d[f"{n}_te"]} for n in names}
-    from distributed import Client
     t0 = time.time()
-    cl = Client(n_workers=4, threads_per_worker=1, processes=False,
-                dashboard_address=None, silence_logs=50)
+    if scheduler_file:
+        from wl_gp2scale.pipeline import connect_dask
+        cl = connect_dask(scheduler_file, n_workers=workers)
+    else:
+        from distributed import Client
+        cl = Client(n_workers=workers, threads_per_worker=1, processes=False,
+                    dashboard_address=None, silence_logs=50)
     try:
         emb = build_channels([ds.atoms[i] for i in tr], ds.y[tr], cat_tr,
                              [ds.atoms[i] for i in te], cat_te, set(names),
@@ -170,6 +175,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seeds", type=int, nargs="+", default=[42, 7, 123])
     ap.add_argument("--emb-dir", default="cache", help="cache for emb_{N}_s{seed}.npz")
+    ap.add_argument("--n", type=int, default=N, help="dataset size (200000 at scale)")
+    ap.add_argument("--nte", type=int, default=NTE,
+                    help="test points carrying a posterior VARIANCE -- one linear solve "
+                         "each, the dominant cost at scale")
+    ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--scheduler-file", default=None,
+                    help="connect to an existing dask cluster instead of a local client")
+    ap.add_argument("--device", default="cpu", help="OUR kernel's torch device")
+    ap.add_argument("--diag-sample", type=int, default=5000,
+                    help="rows in the driver-side density band; lower to ~1000 at 200k")
     ap.add_argument("--mean", default="M1", choices=["M1", "M4"],
                     help="prior mean rung. M1 = linear on the embedding; M4 adds the "
                          "size x embedding interaction. M4 is stronger (+0.09 R^2) but "
@@ -195,7 +210,7 @@ def main():
                                       with_category_tag, SolveWarningCounter)
     assert _resolve_krylov_mode(None) == "single", "fvgp block CG is broken"
 
-    ds = get_data(src="train_4M", n=N, seed=0)
+    ds = get_data(src="train_4M", n=a.n, seed=0)
     idx = np.arange(len(ds.atoms))
     ncat = len(ds.category_names)
     names = np.array(ds.category_names)
@@ -212,9 +227,11 @@ def main():
         cat_tr, cat_te = ds.data_id[tr], ds.data_id[te]
         size_te = np.array([len(ds.atoms[i]) for i in te], float)
         size_tr = np.array([len(ds.atoms[i]) for i in tr], float)
-        sel = np.random.default_rng(0).choice(len(y_te), NTE, replace=False)
+        sel = np.random.default_rng(0).choice(len(y_te), a.nte, replace=False)
 
-        emb = load_or_build_embeddings(ds, tr, te, cat_tr, cat_te, seed, a.emb_dir)
+        emb = load_or_build_embeddings(ds, tr, te, cat_tr, cat_te, seed, a.emb_dir,
+                                       n_total=a.n, workers=a.workers,
+                                       scheduler_file=a.scheduler_file)
         Zm_tr = np.hstack([emb[n]["Ztr"] for n in MEAN_CHAN])
         Zm_te = np.hstack([emb[n]["Zte"] for n in MEAN_CHAN])
         Zk_tr = np.hstack([emb[n]["Ztr"] for n in KERNEL_CHAN])
@@ -233,7 +250,7 @@ def main():
         for n in KERNEL_CHAN:
             dd = emb[n]["Ztr"].shape[1]
             cg = cutoff_for_neighbors(emb[n]["Ztr"], emb[n]["Zte"], K, dim=dd,
-                                      data_id_tr=cat_tr, data_id_te=cat_te, sample=5000)
+                                      data_id_tr=cat_tr, data_id_te=cat_te, sample=a.diag_sample)
             cc, sh = per_category_cutoffs(emb[n]["Ztr"], emb[n]["Zte"], cat_tr, cat_te,
                                           ncat)
             cuts_glob.append(cg); cuts_cat.append(cc); shorts.update(sh)
@@ -271,12 +288,16 @@ def main():
                      if c in shorts else ""))
 
         kern = PerCategoryAdditiveKernel(channels=specs, use_category_tag=True,
-                                         device="cpu", dtype="float64")
+                                         device=a.device, dtype="float64")
         kern.cutoffs_by_cat = cuts_cat
 
         C = len(specs)
-        cl = Client(n_workers=4, threads_per_worker=1, processes=False,
-                    dashboard_address=None, silence_logs=50)
+        if a.scheduler_file:
+            from wl_gp2scale.pipeline import connect_dask
+            cl = connect_dask(a.scheduler_file, n_workers=a.workers)
+        else:
+            cl = Client(n_workers=a.workers, threads_per_worker=1, processes=False,
+                        dashboard_address=None, silence_logs=50)
         t0 = time.time()
         try:
             Xs, ys, _ = sort_by_category(with_category_tag(Zk_tr, cat_tr), r_tr)
@@ -289,7 +310,7 @@ def main():
             release_gp(cl)
         finally:
             cl.close()
-        wc.report(n_evals=NTE, label=f"{tag}-s{seed}")
+        wc.report(n_evals=a.nte, label=f"{tag}-s{seed}")
 
         mu = mean.predict(Zm_te, size=tsz)[sel] + m_gp
         err = y_te[sel] - mu

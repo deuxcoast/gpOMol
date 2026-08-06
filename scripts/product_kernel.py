@@ -106,19 +106,27 @@ class ProductWendlandKernel:
         return Kp.to("cpu").double().numpy()
 
 
-def support_stats(Ztr, cat_tr, cuts, slices, mode, sample=5000, seed=0):
-    """Realised density, median neighbours per row and isolated fraction.
+def distance_bands(Ztr, slices, sample=5000, seed=0):
+    """Per-channel dense (sample x n_train) distance blocks, computed ONCE.
 
-    mode='union' reproduces the additive kernel's support, 'inter' the product's.
-    ``cuts`` is either (C,) one radius per channel, or (C, n_categories) for the
-    per-category variant, in which case the ROW's category selects the radius."""
+    The radius bisection evaluates density ~26 times; recomputing these blocks each pass
+    is invisible at 20k (0.6 GB, seconds) and fatal at 200k (6.4 GB per channel, minutes
+    per pass). Compute once, re-threshold cheaply."""
     rng = np.random.default_rng(seed)
     idx = rng.choice(len(Ztr), size=min(sample, len(Ztr)), replace=False)
+    return idx, [cdist(Ztr[idx, s:e], Ztr[:, s:e]) for s, e in slices]
+
+
+def support_stats(idx, Ds, cat_tr, cuts, mode):
+    """Realised density, median neighbours per row and isolated fraction, from
+    precomputed bands. mode='union' is the additive kernel's support, 'inter' the
+    product's. ``cuts`` is (C,) per channel or (C, n_categories) for the per-category
+    variant, where the ROW's category selects the radius."""
     cuts = np.asarray(cuts)
     nz = None
-    for c, (s, e) in enumerate(slices):
+    for c, D in enumerate(Ds):
         thr = cuts[c] if cuts.ndim == 1 else cuts[c][cat_tr[idx]][:, None]
-        near = cdist(Ztr[idx, s:e], Ztr[:, s:e]) < thr
+        near = D < thr
         nz = near if nz is None else (nz | near if mode == "union" else nz & near)
     nz &= cat_tr[idx][:, None] == cat_tr[None, :]
     deg = nz.sum(axis=1) - 1                    # drop the self entry
@@ -136,6 +144,19 @@ def main():
                          "the WORST UQ gap of any rung, so which one production should "
                          "use is an open question, not a default.")
     ap.add_argument("--out", default="cache/product")
+    ap.add_argument("--n", type=int, default=N, help="dataset size (200000 at scale)")
+    ap.add_argument("--nte", type=int, default=NTE,
+                    help="test points carrying a posterior VARIANCE. One linear solve "
+                         "EACH against the full system, so this is the dominant cost at "
+                         "scale: budget it, do not raise it casually at 200k")
+    ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--scheduler-file", default=None,
+                    help="connect to an existing dask cluster instead of a local client")
+    ap.add_argument("--device", default="cpu", help="OUR kernel's torch device")
+    ap.add_argument("--diag-sample", type=int, default=5000,
+                    help="rows in the driver-side density band. Each channel holds a "
+                         "dense (sample x n_train) float64 block ON THE DRIVER: 0.6 GB at "
+                         "20k but 6.4 GB at 200k, per channel. Lower to ~1000 at scale")
     ap.add_argument("--percat", action="store_true",
                     help="per-category radii INSIDE the product, i.e. combine the two "
                          "levers that each moved the UQ gap on their own (+0.076 for "
@@ -155,7 +176,7 @@ def main():
                                       with_category_tag, SolveWarningCounter)
     assert _resolve_krylov_mode(None) == "single", "fvgp block CG is broken"
 
-    ds = get_data(src="train_4M", n=N, seed=0)
+    ds = get_data(src="train_4M", n=a.n, seed=0)
     idx = np.arange(len(ds.atoms))
     ncat = len(ds.category_names)
 
@@ -170,9 +191,11 @@ def main():
         cat_tr, cat_te = ds.data_id[tr], ds.data_id[te]
         size_te = np.array([len(ds.atoms[i]) for i in te], float)
         size_tr = np.array([len(ds.atoms[i]) for i in tr], float)
-        sel = np.random.default_rng(0).choice(len(y_te), NTE, replace=False)
+        sel = np.random.default_rng(0).choice(len(y_te), a.nte, replace=False)
 
-        emb = load_or_build_embeddings(ds, tr, te, cat_tr, cat_te, seed, a.emb_dir)
+        emb = load_or_build_embeddings(ds, tr, te, cat_tr, cat_te, seed, a.emb_dir,
+                                       n_total=a.n, workers=a.workers,
+                                       scheduler_file=a.scheduler_file)
         Zm_tr = np.hstack([emb[n]["Ztr"] for n in MEAN_CHAN])
         Zm_te = np.hstack([emb[n]["Zte"] for n in MEAN_CHAN])
         Zk_tr = np.hstack([emb[n]["Ztr"] for n in KERNEL_CHAN])
@@ -199,8 +222,9 @@ def main():
                                        ncat)[0] for n in KERNEL_CHAN]
             base_cuts = np.array(pc)                 # (C, ncat)
 
-        d_add, nb_add, iso_add = support_stats(Zk_tr, cat_tr, glob_cuts, slices, "union")
-        d_nat, nb_nat, iso_nat = support_stats(Zk_tr, cat_tr, base_cuts, slices, "inter")
+        bidx, bands = distance_bands(Zk_tr, slices, sample=a.diag_sample)
+        d_add, nb_add, iso_add = support_stats(bidx, bands, cat_tr, glob_cuts, "union")
+        d_nat, nb_nat, iso_nat = support_stats(bidx, bands, cat_tr, base_cuts, "inter")
         print(f"[prod] seed {seed}: additive(union) density {d_add:.4e} "
               f"(median {nb_add:.0f} nbrs, {iso_add:.1%} isolated)")
         print(f"[prod] seed {seed}: product(inter) UNRESCALED density {d_nat:.4e} "
@@ -210,29 +234,34 @@ def main():
         lo, hi = 1.0, 8.0                        # widen both channels until densities match
         for _ in range(26):
             mid = 0.5 * (lo + hi)
-            dm, _, _ = support_stats(Zk_tr, cat_tr, base_cuts * mid, slices, "inter")
+            dm, _, _ = support_stats(bidx, bands, cat_tr, base_cuts * mid, "inter")
             if dm > d_add:
                 hi = mid
             else:
                 lo = mid
         s = 0.5 * (lo + hi)
         cuts = base_cuts * s
-        d_p, nb_p, iso_p = support_stats(Zk_tr, cat_tr, cuts, slices, "inter")
+        d_p, nb_p, iso_p = support_stats(bidx, bands, cat_tr, cuts, "inter")
+        del bands
         print(f"[prod] seed {seed}: matched at scale x{s:.3f} -> density {d_p:.4e} "
               f"(median {nb_p:.0f} nbrs, {iso_p:.1%} isolated)")
 
         if a.percat:
             specs = [ChannelSpec(sl[0], sl[1], float(np.median(c)))
                      for sl, c in zip(slices, cuts)]
-            kern = ProductWendlandKernel(specs, device="cpu", dtype="float64",
+            kern = ProductWendlandKernel(specs, device=a.device, dtype="float64",
                                          cutoffs_by_cat=cuts)
         else:
             specs = [ChannelSpec(sl[0], sl[1], float(c))
                      for sl, c in zip(slices, cuts)]
-            kern = ProductWendlandKernel(specs, device="cpu", dtype="float64")
+            kern = ProductWendlandKernel(specs, device=a.device, dtype="float64")
 
-        cl = Client(n_workers=4, threads_per_worker=1, processes=False,
-                    dashboard_address=None, silence_logs=50)
+        if a.scheduler_file:
+            from wl_gp2scale.pipeline import connect_dask
+            cl = connect_dask(a.scheduler_file, n_workers=a.workers)
+        else:
+            cl = Client(n_workers=a.workers, threads_per_worker=1, processes=False,
+                        dashboard_address=None, silence_logs=50)
         t0 = time.time()
         try:
             Xs, ys, _ = sort_by_category(with_category_tag(Zk_tr, cat_tr), r_tr)
@@ -245,7 +274,7 @@ def main():
             release_gp(cl)
         finally:
             cl.close()
-        wc.report(n_evals=NTE, label=f"prod-s{seed}")
+        wc.report(n_evals=a.nte, label=f"prod-s{seed}")
 
         mu = mean.predict(Zm_te, size=tsz)[sel] + m_gp
         err = y_te[sel] - mu
