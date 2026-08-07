@@ -228,6 +228,20 @@ def main():
                     f"scorer cannot tell them apart. Use a different --out (e.g. "
                     f"cache/product_{a.n // 1000}k) or delete the old file."
                 )
+            # An accuracy-only arm and a UQ arm are DIFFERENT measurements that land on
+            # the same filename, so matching n is not enough: without this, the cheap
+            # --no-variance rung silently blocks the expensive variance rung that is the
+            # actual experiment, and the run exits 0 having done nothing.
+            v_prev = (int(prev["has_variance"]) if "has_variance" in prev.files else 1)
+            if v_prev != int(not a.no_variance):
+                raise SystemExit(
+                    f"[prod] ABORT: {out} holds an "
+                    f"{'accuracy-only (--no-variance)' if not v_prev else 'UQ'} result "
+                    f"but this run is "
+                    f"{'accuracy-only (--no-variance)' if a.no_variance else 'UQ'}. "
+                    f"Same filename, different measurement. Use a separate --out (e.g. "
+                    f"{a.out}_uq) so both survive."
+                )
             print(f"[prod] {out} exists (n={n_prev if n_prev else '?'}), skipping")
             continue
 
