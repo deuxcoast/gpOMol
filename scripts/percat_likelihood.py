@@ -87,6 +87,22 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seeds", type=int, nargs="+", default=[42, 7, 123])
     ap.add_argument("--emb-dir", default="cache")
+    ap.add_argument("--mean", default="M1", choices=["M0", "M1", "M4"],
+                    help="prior mean rung the residual is taken against. The original "
+                         "run hardcoded M1, so 'the likelihood wants the radius at the "
+                         "grid edge' was measured at ONE mean and the mean was never a "
+                         "variable. M0 (no mean at all, just the extensive residual) "
+                         "tests whether a strong mean is what removed the correlation "
+                         "length. NOTE M0 is gated out as a PRODUCTION config (-0.36 "
+                         "R^2); this is a diagnostic probe, which is a different thing.")
+    ap.add_argument("--sv-grid", type=float, nargs="+", default=None,
+                    help="multipliers on the signal variance, profiled JOINTLY with the "
+                         "radius. The original run held sv fixed at prior_var/C, shared "
+                         "across categories whose residual variances differ 8.2x -- so "
+                         "the radius may have been absorbing a VARIANCE misspecification "
+                         "rather than expressing a correlation length. Since the "
+                         "likelihood is exactly separable by category, a joint (radius, "
+                         "sv) grid per category is still exact. Costs len(sv-grid)x.")
     a = ap.parse_args()
 
     from wl_gp2scale.cutoff import cutoff_for_neighbors
@@ -109,10 +125,19 @@ def main():
         emb = {n: {"Ztr": d[f"{n}_tr"], "Zte": d[f"{n}_te"]} for n in
                sorted(set(MEAN_CHAN) | set(KERNEL_CHAN))}
         Zm_tr = np.hstack([emb[n]["Ztr"] for n in MEAN_CHAN])
-        mean = LinearEmbeddingMean().fit(Zm_tr, y_tr, size=None)
-        r_tr = y_tr - mean.predict(Zm_tr, size=None)
+        if a.mean == "M0":
+            # no prior mean at all: the GP models the extensive residual directly
+            r_tr = y_tr.copy()
+        else:
+            msz = (np.array([len(ds.atoms[i]) for i in tr], float)
+                   if a.mean == "M4" else None)
+            mean = LinearEmbeddingMean().fit(Zm_tr, y_tr, size=msz)
+            r_tr = y_tr - mean.predict(Zm_tr, size=msz)
         prior_var = float(np.var(r_tr))
-        sv = [prior_var / len(KERNEL_CHAN)] * len(KERNEL_CHAN)
+        sv0 = np.array([prior_var / len(KERNEL_CHAN)] * len(KERNEL_CHAN))
+        sv_grid = np.array(a.sv_grid) if a.sv_grid else np.array([1.0])
+        print(f"[lik] seed {seed} mean={a.mean}: var(residual)={prior_var:.3f}, "
+              f"sv per channel={sv0[0]:.3f}, jitter={JITTER}")
 
         cuts_cat = []
         for n in KERNEL_CHAN:
@@ -136,15 +161,22 @@ def main():
                 continue
             Ds = [cdist(emb[n]["Ztr"][m], emb[n]["Ztr"][m]) for n in KERNEL_CHAN]
             rc = r_tr[m]
-            ll = np.array([block_loglik(Ds, cuts_cat[:, c] * g, rc, sv, JITTER)
-                           for g in GRID])
+            # (radius multiplier) x (signal-variance multiplier); sv_grid is [1.0]
+            # unless --sv-grid was given, which reproduces the original 1-D profile
+            LL = np.array([[block_loglik(Ds, cuts_cat[:, c] * g, rc, sv0 * s, JITTER)
+                            for g in GRID] for s in sv_grid])
+            si, gi = np.unravel_index(int(np.nanargmax(LL)), LL.shape)
+            # profile in the RADIUS at the best sv, referenced to (m=1, that same sv),
+            # so the sparkline still answers "what does the radius want" rather than
+            # mixing in the sv gain
+            ll = LL[si]
             rel = ll - ll[GRID == 1.0][0]
-            j = int(np.nanargmax(ll))
-            tot += rel[j]
-            best_all.setdefault(c, []).append(GRID[j])
+            tot += rel[gi]
+            best_all.setdefault(c, []).append((GRID[gi], sv_grid[si]))
             spark = " ".join(f"{v:+.0f}" for v in rel)
-            print(f"{str(names[c]):>18} {n_c:>8} {GRID[j]:>9.2f} {rel[j]:>+14.1f}   "
-                  f"{spark}")
+            svcol = f" sv*{sv_grid[si]:<5.2f}" if len(sv_grid) > 1 else ""
+            print(f"{str(names[c]):>18} {n_c:>8} {GRID[gi]:>9.2f}{svcol} "
+                  f"{rel[gi]:>+14.1f}   {spark}")
         print(f"{'TOTAL':>18} {'':>8} {'':>9} {tot:>+14.1f}   "
               f"(sum over categories of the gain from re-optimising each radius)")
         print(f"  grid: {GRID}\n")
@@ -152,10 +184,20 @@ def main():
     print("=" * 96)
     print("VERDICT")
     print("=" * 96)
-    print(f"{'category':>18} {'argmax m per seed':>26} {'mean':>7}")
+    print(f"mean rung = {a.mean}"
+          + (f", sv grid = {list(sv_grid)}" if len(sv_grid) > 1 else ""))
+    print(f"{'category':>18} {'argmax m per seed':>26} {'mean':>7} {'argmax sv':>22}")
+    n_edge = 0
     for c in sorted(best_all):
-        v = np.array(best_all[c])
-        print(f"{str(names[c]):>18} {np.array2string(v):>26} {v.mean():>7.2f}")
+        v = np.array([x[0] for x in best_all[c]])
+        s = np.array([x[1] for x in best_all[c]])
+        n_edge += int(v.mean() >= GRID[-1])
+        sc = np.array2string(s) if len(sv_grid) > 1 else ""
+        print(f"{str(names[c]):>18} {np.array2string(v):>26} {v.mean():>7.2f} {sc:>22}")
+    print(f"\n  {n_edge}/{len(best_all)} categories pinned at the grid EDGE "
+          f"(m={GRID[-1]}). A likelihood that rises monotonically to the boundary is "
+          f"not identifying a radius -- it is saying 'wider', and MCMC over it would "
+          f"report wherever the prior stops it.")
     print("\n  If argmax m clusters near 1, the neighbour-count heuristic is already at")
     print("  the likelihood optimum and MCMC over this parameterisation buys nothing.")
     print("  If it clusters away from 1 and consistently across seeds, the likelihood")
