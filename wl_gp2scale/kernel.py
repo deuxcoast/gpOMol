@@ -463,3 +463,175 @@ def check_kernel_psd(kernel_fn: Callable, X_sample, hps, tol: float = 1e-8) -> d
         "gram_density": density,
         "n_sample": int(len(X_sample)),
     }
+
+
+# ============================ Gibbs (non-stationary) =========================
+
+
+@dataclass
+class GibbsWendlandKernel:
+    """Non-stationary product kernel: a Gibbs construction with a WENDLAND shape.
+
+        k(x,x') = sv * 1[cat(x)=cat(x')] * prod_c  P_c(x,x') * psi( d_c / sqrt(S_c) )
+
+        S_c     = l_c(x)^2 + l_c(x')^2                         (effective support^2)
+        P_c     = [ 2 l_c(x) l_c(x') / S_c ] ^ (dim_c / 2)     (the PSD prefactor)
+        l_c(x)  = c[chan, cat(x)] * sigma_k_c(x)
+
+    WHY THIS EXISTS. The stationary kernel asserts one radius and one amplitude
+    everywhere, and that is measurably false here: residual variance spans 8.2x across
+    chemical families and the median 10-NN distance spans 2.3x. Letting the length scale
+    vary is not as simple as substituting l(x) into psi -- that is not a valid covariance
+    function. The Gibbs / Paciorek-Schervish prefactor is what restores positive
+    definiteness, by discounting covariance between points that DISAGREE about their
+    length scale. It is the ratio of the geometric to the quadratic mean of the two
+    scales, raised to the dimension: exactly 1 when they agree, falling to 0 as they
+    diverge.
+
+    COMPACT SUPPORT SURVIVES, which is the whole reason to use Wendland rather than the
+    Gaussian this construction is usually written with: the prefactor is a positive
+    scalar, so the kernel still vanishes beyond sqrt(l(x)^2 + l(x')^2) and the matrix
+    stays sparse. That is what makes a non-stationary kernel affordable at gp2Scale sizes.
+
+    ``dim_c`` MUST BE THE AMBIENT (embedding) DIMENSION OF THE CHANNEL, not the Wendland's
+    design dimension. psi_{3,2} is "the d<=3 Wendland", so d=3 is the natural guess and it
+    is badly wrong: measured on real data at a 10x length-scale spread, the prefactor at
+    d=3 leaves a relative min-eigenvalue of -4.7e-2 (a jitter of 4.30 does NOT rescue
+    that), at d=1 it is -0.35, with no prefactor -0.76, and only at the ambient d=10 does
+    the Gram come out PSD to the float64 noise floor. See scripts/gibbs_psd_gate.py.
+
+    POSITIVE DEFINITENESS IS VERIFIED NUMERICALLY, NOT PROVEN. Paciorek & Schervish's
+    theorem needs the shape to be PD in R^d for every d, which Wendland functions are not.
+    The gate script checks it directly at the operating point and reports how it fails
+    when the prefactor is wrong; re-run it if the embedding dimension or the spread of l
+    changes materially.
+
+    INPUT LAYOUT.  ``[ z_0 | ... | z_{C-1} | sk_0 | ... | sk_{C-1} | data_id ]``
+    -- the per-channel local scales ride along as extra columns because gp2Scale hands
+    the kernel COORDINATE BLOCKS, never row indices, so there is nowhere else to look
+    them up from. ``with_gibbs_tags`` builds this layout; the category tag stays LAST so
+    ``sort_by_category`` is unchanged.
+
+    hps layout: ``hps[0]`` = the single signal variance (the diagonal is a product of
+    ones, so it enters once rather than per channel); ``hps[1:]`` = the (C, n_cat)
+    multipliers c, flattened C-major. Putting them in hps rather than closing over them
+    is what lets them be trained later at no cost now.
+    """
+
+    channels: list                     # list[ChannelSpec]; only start/stop are used
+    n_cat: int = 1
+    device: Optional[str] = None
+    dtype: str = "float64"
+
+    def __post_init__(self):
+        if torch is None:
+            raise ImportError("wl_gp2scale.kernel requires PyTorch.")
+        self.channels = [c if isinstance(c, ChannelSpec) else ChannelSpec(*c)
+                         for c in self.channels]
+        self._tdtype = torch.float32 if self.dtype == "float32" else torch.float64
+        self._emb_dim = self.channels[-1].stop          # end of the embedding block
+        self._n_chan = len(self.channels)
+        self._cat_col = self._emb_dim + self._n_chan    # scales sit in between
+
+    @property
+    def _device(self) -> str:
+        # resolved per process at call time, never cached -- see AdditiveWendlandKernel
+        if self.device is not None:
+            return self.device
+        return "cuda" if torch.cuda.is_available() else "cpu"
+
+    def n_hps(self) -> int:
+        return 1 + self._n_chan * self.n_cat
+
+    def unpack(self, hps):
+        """-> (signal_variance, c) with c shaped (C, n_cat)."""
+        hps = np.asarray(hps, dtype=float).ravel()
+        exp = self.n_hps()
+        if hps.size != exp:
+            raise ValueError("expected %d hps (1 sv + %d channels x %d categories), "
+                             "got %d" % (exp, self._n_chan, self.n_cat, hps.size))
+        return float(hps[0]), hps[1:].reshape(self._n_chan, self.n_cat)
+
+    def __call__(self, x1, x2, hps):
+        td, dev = self._tdtype, self._device
+        x1, x2 = np.asarray(x1), np.asarray(x2)
+        n1, n2 = x1.shape[0], x2.shape[0]
+        cats1 = x1[:, self._cat_col].astype(np.int64)
+        cats2 = x2[:, self._cat_col].astype(np.int64)
+        if np.intersect1d(np.unique(cats1), np.unique(cats2)).size == 0:
+            return np.zeros((n1, n2), dtype=np.float64)
+
+        sv, cmat = self.unpack(hps)
+        K = torch.ones((n1, n2), dtype=td, device=dev)
+        for ci, ch in enumerate(self.channels):
+            a = torch.as_tensor(x1[:, ch.start:ch.stop], dtype=td, device=dev)
+            b = torch.as_tensor(x2[:, ch.start:ch.stop], dtype=td, device=dev)
+            D = torch.cdist(a, b, compute_mode="donot_use_mm_for_euclid_dist")
+            # l = c[channel, category of the ROW] * that row's local scale. Exact rather
+            # than approximate: every entry surviving the category mask has cats1==cats2.
+            sk1 = torch.as_tensor(x1[:, self._emb_dim + ci], dtype=td, device=dev)
+            sk2 = torch.as_tensor(x2[:, self._emb_dim + ci], dtype=td, device=dev)
+            c_row = torch.as_tensor(cmat[ci][cats1], dtype=td, device=dev)
+            c_col = torch.as_tensor(cmat[ci][cats2], dtype=td, device=dev)
+            li = (c_row * sk1).clamp_min(1e-12).view(-1, 1)
+            lj = (c_col * sk2).clamp_min(1e-12).view(1, -1)
+
+            S = li * li + lj * lj
+            dim_c = float(ch.stop - ch.start)          # AMBIENT dim -- see the docstring
+            pref = (2.0 * li * lj / S).pow(0.5 * dim_c)
+            t = torch.clamp(D / torch.sqrt(S), 0.0, 1.0)
+            Kc = torch.where(t < 1.0, _wendland32(t), torch.zeros_like(t))
+            K = K * pref * Kc
+
+        K = K * sv
+        ca = torch.as_tensor(cats1, device=dev).view(-1, 1)
+        cb = torch.as_tensor(cats2, device=dev).view(1, -1)
+        K = torch.where(ca == cb, K, torch.zeros_like(K))
+        return K.to("cpu").double().numpy()
+
+
+def local_scale_k(Z_ref, Z_query, cat_ref, cat_query, k=10, block=2048):
+    """sigma_k(x) = distance to x's k-th nearest SAME-CATEGORY point in ``Z_ref``.
+
+    Same-category because the kernel zeroes everything else, so the local density that
+    matters is the one within the block. Blocked over queries: the full (n_query, n_ref)
+    distance matrix is 51 GB at 200k and is never needed at once.
+
+    For training points pass Z_query is Z_ref; the self-distance is dropped."""
+    Z_ref = np.asarray(Z_ref, float)
+    Z_query = np.asarray(Z_query, float)
+    cat_ref = np.asarray(cat_ref)
+    cat_query = np.asarray(cat_query)
+    same_set = Z_query is Z_ref
+    out = np.zeros(len(Z_query))
+    for c in np.unique(cat_query):
+        qi = np.where(cat_query == c)[0]
+        ri = np.where(cat_ref == c)[0]
+        if len(ri) == 0:
+            out[qi] = np.nan
+            continue
+        kk = min(k, len(ri) - 1) if same_set else min(k, len(ri))
+        kk = max(kk, 1)
+        for s in range(0, len(qi), block):
+            q = qi[s:s + block]
+            D = np.linalg.norm(Z_query[q][:, None, :] - Z_ref[ri][None, :, :], axis=2)
+            if same_set:
+                for a, g in enumerate(q):
+                    hit = np.where(ri == g)[0]
+                    if hit.size:
+                        D[a, hit[0]] = np.inf
+            out[q] = np.partition(D, kk - 1, axis=1)[:, kk - 1]
+    bad = ~np.isfinite(out) | (out <= 0)
+    if bad.any():                       # singleton categories, exact duplicates
+        out[bad] = np.nanmedian(out[~bad]) if (~bad).any() else 1.0
+    return out
+
+
+def with_gibbs_tags(Zs, scales, data_id):
+    """Assemble ``[ z_0 | ... | z_{C-1} | sk_0 | ... | sk_{C-1} | data_id ]``.
+
+    ``Zs`` and ``scales`` are per-channel lists, in the SAME order as the kernel's
+    ``channels``. The category tag stays last so sort_by_category is unchanged."""
+    Z = np.hstack([np.asarray(z, float) for z in Zs])
+    S = np.column_stack([np.asarray(s, float) for s in scales])
+    return np.hstack([Z, S, np.asarray(data_id, float)[:, None]])
