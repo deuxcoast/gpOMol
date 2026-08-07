@@ -133,6 +133,28 @@ def support_stats(idx, Ds, cat_tr, cuts, mode):
     return float(nz.mean()), float(np.median(deg)), float(np.mean(deg <= 0))
 
 
+def support_stats_gibbs(idx, Ds, cat_tr, ells, scale):
+    """Realised density under the GIBBS support, sqrt(l_i^2 + l_j^2).
+
+    The stationary version thresholds against a scalar (or a per-ROW vector). Here the
+    threshold depends on BOTH endpoints, so it is a full (sample x n_train) array -- the
+    same size as the distance band itself, which is why this is computed per channel and
+    released rather than held for all channels at once.
+
+    ``scale`` multiplies every l, so the bisection that matches this arm's density to the
+    baseline's works exactly as before: support is homogeneous of degree 1 in l."""
+    nz = None
+    for D, ell in zip(Ds, ells):
+        e = ell * scale
+        thr = np.sqrt(e[idx][:, None] ** 2 + e[None, :] ** 2)
+        near = D < thr
+        del thr
+        nz = near if nz is None else (nz & near)
+    nz &= cat_tr[idx][:, None] == cat_tr[None, :]
+    deg = nz.sum(axis=1) - 1
+    return float(nz.mean()), float(np.median(deg)), float(np.mean(deg <= 0))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seeds", type=int, nargs="+", default=[42, 7, 123])
@@ -157,6 +179,21 @@ def main():
                     help="rows in the driver-side density band. Each channel holds a "
                          "dense (sample x n_train) float64 block ON THE DRIVER: 0.6 GB at "
                          "20k but 6.4 GB at 200k, per channel. Lower to ~1000 at scale")
+    ap.add_argument("--gibbs", action="store_true",
+                    help="NON-STATIONARY: replace the fixed per-channel radius with a "
+                         "Gibbs construction, l(x) = c[channel, family] * sigma_k(x), "
+                         "so the support varies continuously WITHIN each family while "
+                         "the category mask is kept. Keeping the mask is deliberate: it "
+                         "keeps PSD free, keeps the likelihood exactly separable by "
+                         "family (a dense Cholesky per block instead of a distributed "
+                         "rebuild), and keeps the sparsity the 4M target needs. With c "
+                         "constant and sigma_k constant this reduces EXACTLY to the "
+                         "stationary product kernel -- see scripts/test_gibbs_kernel.py")
+    ap.add_argument("--gibbs-k", type=int, default=10,
+                    help="k for sigma_k(x), the distance to the k-th nearest "
+                         "same-category neighbour. The earlier local-scaling screen "
+                         "swept 7/10/20/50 and the separation statistics were flat "
+                         "across it, so this is not a sensitive knob")
     ap.add_argument("--no-variance", action="store_true",
                     help="skip the posterior VARIANCE and report accuracy only, on the "
                          "FULL test set. Variance is one linear solve per test point "
@@ -211,7 +248,8 @@ def main():
     ncat = len(ds.category_names)
 
     for seed in a.seeds:
-        tag = (("prodpercat" if a.percat else "product") + chan_tag
+        tag = (("prodgibbs" if a.gibbs else "prodpercat" if a.percat else "product")
+               + chan_tag
                + ("" if a.mean == "M1" else "-M4"))
         out = os.path.join(a.out, f"{tag}_s{seed}.npz")
         if os.path.exists(out):
@@ -319,24 +357,45 @@ def main():
         tgt_bands = [by_name[n] for n in KERNEL_CHAN]          # the baseline's channels
         print(f"[prod] seed {seed}: bands ready in {time.time() - tband:.0f}s", flush=True)
         d_add, nb_add, iso_add = support_stats(bidx, tgt_bands, cat_tr, tgt_cuts, "union")
-        d_nat, nb_nat, iso_nat = support_stats(bidx, bands, cat_tr, base_cuts, "inter")
-        print(f"[prod] seed {seed}: additive(union) density {d_add:.4e} "
-              f"(median {nb_add:.0f} nbrs, {iso_add:.1%} isolated)")
+
+        # The GIBBS arm replaces each channel's fixed radius with l(x) = c * sigma_k(x).
+        # sigma_k is computed on the TRAIN set only and reused for test points, so no
+        # test information reaches the support. The bisection below is unchanged in
+        # spirit: support is homogeneous of degree 1 in l, so one global multiplier
+        # still lands the arm on the SAME density target as every other arm.
+        ells_tr = None
+        if a.gibbs:
+            from wl_gp2scale.kernel import local_scale_k
+            t0k = time.time()
+            ells_tr = [local_scale_k(emb[n]["Ztr"], emb[n]["Ztr"], cat_tr, cat_tr,
+                                     k=a.gibbs_k) for n in kchan]
+            sp = [float(np.percentile(e, 90) / np.percentile(e, 10)) for e in ells_tr]
+            print(f"[prod] seed {seed}: sigma_{a.gibbs_k} local scales in "
+                  f"{time.time() - t0k:.0f}s; p90/p10 spread per channel "
+                  f"{np.round(sp, 2).tolist()}", flush=True)
+            stat = lambda sc: support_stats_gibbs(bidx, bands, cat_tr, ells_tr, sc)
+        else:
+            stat = lambda sc: support_stats(bidx, bands, cat_tr, base_cuts * sc, "inter")
+
+        d_nat, nb_nat, iso_nat = stat(1.0)
         print(f"[prod] seed {seed}: product(inter) UNRESCALED density {d_nat:.4e} "
               f"(median {nb_nat:.0f} nbrs, {iso_nat:.1%} isolated) "
               f"-> {d_add / max(d_nat, 1e-12):.0f}x sparser than additive")
 
-        lo, hi = 1.0, 8.0                        # widen both channels until densities match
-        for _ in range(26):
-            mid = 0.5 * (lo + hi)
-            dm, _, _ = support_stats(bidx, bands, cat_tr, base_cuts * mid, "inter")
-            if dm > d_add:
+        lo, hi = (1e-3, 8.0) if a.gibbs else (1.0, 8.0)
+        # the Gibbs bracket must open downward too: l starts at sigma_k, an absolute
+        # distance with no reason to sit near the stationary radius, so the matching
+        # multiplier can be well below 1 -- unlike the stationary arm, where c=1 IS the
+        # neighbour-count radius and only widening is ever needed.
+        for _ in range(40 if a.gibbs else 26):
+            mid = np.sqrt(lo * hi) if a.gibbs else 0.5 * (lo + hi)
+            if stat(mid)[0] > d_add:
                 hi = mid
             else:
                 lo = mid
-        s = 0.5 * (lo + hi)
+        s = np.sqrt(lo * hi) if a.gibbs else 0.5 * (lo + hi)
         cuts = base_cuts * s
-        d_p, nb_p, iso_p = support_stats(bidx, bands, cat_tr, cuts, "inter")
+        d_p, nb_p, iso_p = stat(s)
         del bands, tgt_bands, all_bands, by_name
         print(f"[prod] seed {seed}: matched at scale x{s:.3f} -> density {d_p:.4e} "
               f"(median {nb_p:.0f} nbrs, {iso_p:.1%} isolated)")
@@ -351,11 +410,27 @@ def main():
             raise SystemExit(
                 f"[prod] ABORT seed {seed}: density matching FAILED -- product "
                 f"{d_p:.4e} vs additive target {d_add:.4e} ({rel:.1%} off) at scale "
-                f"x{s:.3f} in bracket [1, 8]. The arms would not be density-matched. "
-                f"Widen the bracket (hi) and rerun; do not score this."
+                f"x{s:.3f} in bracket [{lo:.3g}, {hi:.3g}]. The arms would not be "
+                f"density-matched. Widen the bracket and rerun; do not score this."
             )
 
-        if a.percat:
+        if a.gibbs:
+            from wl_gp2scale.kernel import GibbsWendlandKernel, with_gibbs_tags
+            specs = [ChannelSpec(sl[0], sl[1], 0.0) for sl in slices]
+            kern = GibbsWendlandKernel(channels=specs, n_cat=ncat, device=a.device,
+                                       dtype="float64")
+            # sigma_k for TEST points is measured against the TRAIN set: it is a
+            # property of how well covered a query is, and using the test set's own
+            # density would leak. c starts at the matched scale s, uniform across
+            # families -- the stationary configuration, which is the right place for a
+            # later optimiser or MCMC chain to start from.
+            ells_te = [local_scale_k(emb[n]["Ztr"], emb[n]["Zte"], cat_tr, cat_te,
+                                     k=a.gibbs_k) for n in kchan]
+            c_init = np.full((len(kchan), ncat), s, dtype=float)
+            hp_vec = np.concatenate([[prior_var], c_init.ravel()])
+            Xk_tr = with_gibbs_tags([emb[n]["Ztr"] for n in kchan], ells_tr, cat_tr)
+            Xk_te = with_gibbs_tags([emb[n]["Zte"] for n in kchan], ells_te, cat_te)
+        elif a.percat:
             specs = [ChannelSpec(sl[0], sl[1], float(np.median(c)))
                      for sl, c in zip(slices, cuts)]
             kern = ProductWendlandKernel(specs, device=a.device, dtype="float64",
@@ -364,6 +439,10 @@ def main():
             specs = [ChannelSpec(sl[0], sl[1], float(c))
                      for sl, c in zip(slices, cuts)]
             kern = ProductWendlandKernel(specs, device=a.device, dtype="float64")
+        if not a.gibbs:
+            hp_vec = np.array([prior_var], dtype=float)
+            Xk_tr = with_category_tag(Zk_tr, cat_tr)
+            Xk_te = with_category_tag(Zk_te, cat_te)
 
         if a.scheduler_file:
             from wl_gp2scale.pipeline import connect_dask
@@ -373,13 +452,13 @@ def main():
                         dashboard_address=None, silence_logs=50)
         t0 = time.time()
         try:
-            Xs, ys, _ = sort_by_category(with_category_tag(Zk_tr, cat_tr), r_tr)
+            Xs, ys, _ = sort_by_category(Xk_tr, r_tr)
             print(f"[prod] seed {seed}: building the GP on {len(Xs):,} train rows "
                   f"({a.workers} workers, kernel on {a.device}) ...", flush=True)
             with SolveWarningCounter() as wc:
                 tb = time.time()
                 gp, _ = build_gp(Xs, ys, None, None, cl, kernel_override=kern,
-                                 signal_var=[prior_var], jitter=JITTER, **SOLVE)
+                                 signal_var=hp_vec, jitter=JITTER, **SOLVE)
                 if a.no_variance:
                     # The posterior MEAN reuses the precomputed KVinvY, so it costs ONE
                     # solve in total no matter how many test points. Variance is what
@@ -390,15 +469,15 @@ def main():
                     print(f"[prod] seed {seed}: GP built in {time.time() - tb:.0f}s. "
                           f"Mean only on ALL {len(te):,} test points (one solve total; "
                           f"--no-variance, so no UQ columns).", flush=True)
-                    m_gp, v_gp = predict(gp, with_category_tag(Zk_te, cat_te),
-                                         batch=2000, variance=False, verbose=True)
+                    m_gp, v_gp = predict(gp, Xk_te, batch=2000, variance=False,
+                                         verbose=True)
                 else:
                     print(f"[prod] seed {seed}: GP built in {time.time() - tb:.0f}s. Now "
                           f"{a.nte} posterior variances = {a.nte} SEPARATE LINEAR SOLVES "
                           f"against the full system -- the dominant cost at this N.",
                           flush=True)
-                    m_gp, v_gp = predict(gp, with_category_tag(Zk_te[sel], cat_te[sel]),
-                                         batch=100, variance=True, verbose=True)
+                    m_gp, v_gp = predict(gp, Xk_te[sel], batch=100, variance=True,
+                                         verbose=True)
             del gp
             release_gp(cl)
         finally:
