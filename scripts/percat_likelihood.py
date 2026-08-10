@@ -155,6 +155,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seeds", type=int, nargs="+", default=[42, 7, 123])
     ap.add_argument("--emb-dir", default="cache")
+    ap.add_argument("--n", type=int, default=N,
+                    help="dataset size; must match an existing cache/emb_{n}_s{seed}.npz")
     ap.add_argument("--mean", default="M1", choices=["M0", "M1", "M4"],
                     help="prior mean rung the residual is taken against. The original "
                          "run hardcoded M1, so 'the likelihood wants the radius at the "
@@ -189,7 +191,17 @@ def main():
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from percat_radius import per_category_cutoffs
 
-    ds = get_data(src="train_4M", n=N, seed=0)
+    # Check every embedding BEFORE get_data: a wrong --n otherwise materialises and
+    # caches the whole subset (803 MB at 100k, minutes at 4M) and only then fails.
+    missing = [f"emb_{a.n}_s{sd}.npz" for sd in a.seeds
+               if not os.path.exists(os.path.join(a.emb_dir, f"emb_{a.n}_s{sd}.npz"))]
+    if missing:
+        raise SystemExit(f"no embedding(s) in {a.emb_dir}: {missing}. Build them with a "
+                         f"product_kernel.py / percat_radius.py run at --n {a.n}, which "
+                         f"caches them. (Checked before loading data, so nothing was "
+                         f"materialised.)")
+
+    ds = get_data(src="train_4M", n=a.n, seed=0)
     idx = np.arange(len(ds.atoms))
     ncat = len(ds.category_names)
     names = np.array(ds.category_names)
@@ -199,7 +211,7 @@ def main():
         tr, te = train_test_split(idx, test_size=0.2, random_state=seed)
         y_tr = ds.y[tr]
         cat_tr, cat_te = ds.data_id[tr], ds.data_id[te]
-        d = np.load(os.path.join(a.emb_dir, f"emb_{N}_s{seed}.npz"), allow_pickle=True)
+        d = np.load(os.path.join(a.emb_dir, f"emb_{a.n}_s{seed}.npz"), allow_pickle=True)
         emb = {n: {"Ztr": d[f"{n}_tr"], "Zte": d[f"{n}_te"]} for n in
                sorted(set(MEAN_CHAN) | set(KERNEL_CHAN))}
         Zm_tr = np.hstack([emb[n]["Ztr"] for n in MEAN_CHAN])
