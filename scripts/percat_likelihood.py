@@ -389,14 +389,23 @@ def main():
     if n_flat:
         print(f"\n  {n_flat} categorie(s) excluded as uninformative: too few rows to "
               f"reach the neighbour target, so the block is dense at every m.")
-    print(f"\n  {n_edge}/{n_use} INFORMATIVE categories ran to the end of the grid.")
-    print(f"\n  This is a stronger statement than the old multiplier grid could make. "
-          f"The likelihood is not merely 'still rising at our boundary' -- it is "
-          f"maximised at the FULLY DENSE covariance, which is the regime the position "
+    fr = [float(np.mean([x[4] for x in best_all[c]])) for c in sorted(best_all)
+          if not all(x[2] for x in best_all[c])]
+    n_sat = sum(1 for f in fr if f >= 0.95)
+    print(f"\n  {n_edge}/{n_use} ran to the end of the grid (widen it if nonzero).")
+    print(f"  {n_sat}/{n_use} optima sit at >=95% block density -- SATURATED. There the "
+          f"support already covers everything, so the optimum is not a sparsity "
+          f"statement at all: it is the scale at which the DENSE kernel best matches "
+          f"the data's correlation decay. Widening past it only flattens psi toward 1 "
+          f"and degenerates K toward rank one, which is what the decline measures.")
+    print(f"  {n_use - n_sat}/{n_use} optima sit BELOW 95% -- those are the families "
+          f"with a correlation length a sparse kernel can actually exploit.")
+    print(f"\n  Read the two counts together. A saturated optimum means the likelihood "
+          f"prefers a covariance with no exploitable sparsity -- the regime the position "
           f"paper's sec 7 says offers no computational advantage over a standard dense "
-          f"GP. Any sparsity therefore comes from the PRIOR, not the data, and the "
-          f"prior's strength should be stated in these same units (neighbours per row) "
-          f"so it reads as a computational budget rather than a free parameter.")
+          f"GP. Where that dominates, sparsity must come from the PRIOR rather than the "
+          f"data, and the prior should be specified in neighbours per row so it reads as "
+          f"a stated computational budget rather than a free parameter.")
     print("\n  An INTERIOR optimum is the informative case: that family has a real")
     print("  correlation length the data can identify, and MCMC over it is justified.")
     print("  Check the fraction column before believing one -- an 'optimum' at 0.95")
