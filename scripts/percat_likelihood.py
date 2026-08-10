@@ -83,6 +83,74 @@ def block_loglik(Ds, cuts, r, sv, jitter):
     return float(-0.5 * r @ alpha - 0.5 * logdet)
 
 
+def block_loglik_product(Ds, cuts, r, sv, jitter):
+    """PRODUCT kernel on one block: k = sv * prod_c psi(d_c / rho_c).
+
+    The recorded grid-edge result was measured on the ADDITIVE kernel, which is no
+    longer what production runs. That is the same class of untested assumption as the
+    hardcoded mean rung, so the profile is available on every kernel we actually use."""
+    n = len(r)
+    K = np.ones((n, n))
+    for D, c in zip(Ds, cuts):
+        t = np.clip(D / c, 0.0, 1.0)
+        K *= np.where(t < 1.0, _wendland32_np(t), 0.0)
+    return _chol_loglik(sv * K, r, jitter)
+
+
+def block_loglik_gibbs(Ds, sks, dims, ells_scale, r, sv, jitter):
+    """GIBBS kernel on one block: l_i = ells_scale * sigma_k(i), support sqrt(l_i^2+l_j^2).
+
+    dims must be the AMBIENT channel dimensions -- the prefactor exponent is what makes
+    a varying length scale admissible, and using the Wendland's design dimension instead
+    leaves a relative min-eigenvalue of -4.7e-2 (scripts/gibbs_psd_gate.py)."""
+    n = len(r)
+    K = np.ones((n, n))
+    for D, sk, dim in zip(Ds, sks, dims):
+        ell = np.maximum(ells_scale * sk, 1e-12)
+        S = ell[:, None] ** 2 + ell[None, :] ** 2
+        pref = (2.0 * ell[:, None] * ell[None, :] / S) ** (0.5 * dim)
+        t = np.clip(D / np.sqrt(S), 0.0, 1.0)
+        K *= pref * np.where(t < 1.0, _wendland32_np(t), 0.0)
+    return _chol_loglik(sv * K, r, jitter)
+
+
+def _chol_loglik(K, r, jitter):
+    KV = K.copy()
+    KV[np.diag_indices_from(KV)] += jitter
+    try:
+        cf = cho_factor(KV, lower=True, check_finite=False)
+    except np.linalg.LinAlgError:
+        return np.nan
+    alpha = cho_solve(cf, r, check_finite=False)
+    return float(-0.5 * r @ alpha - np.sum(np.log(np.diag(cf[0]))))
+
+
+def _gibbs_nbrs(Ds, sks, scale):
+    """Median in-support neighbours under the Gibbs support, for the m=1 calibration."""
+    nz = None
+    for D, sk in zip(Ds, sks):
+        ell = scale * sk
+        near = D < np.sqrt(ell[:, None] ** 2 + ell[None, :] ** 2)
+        nz = near if nz is None else (nz & near)
+    return float(np.median(nz.sum(axis=1) - 1))
+
+
+def gibbs_unit_scale(Ds, sks, target):
+    """The l multiplier that puts this block at `target` neighbours -- so that m=1 in the
+    profile means THE HEURISTIC, exactly as it does for the stationary arms. Without this
+    the Gibbs grid would be centred on an arbitrary point (sigma_k is an absolute distance
+    with no reason to sit near the neighbour-count radius) and the two profiles would not
+    be comparable."""
+    lo, hi = 1e-4, 1e4
+    for _ in range(50):
+        mid = np.sqrt(lo * hi)
+        if _gibbs_nbrs(Ds, sks, mid) > target:
+            hi = mid
+        else:
+            lo = mid
+    return float(np.sqrt(lo * hi))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seeds", type=int, nargs="+", default=[42, 7, 123])
@@ -95,6 +163,16 @@ def main():
                          "tests whether a strong mean is what removed the correlation "
                          "length. NOTE M0 is gated out as a PRODUCTION config (-0.36 "
                          "R^2); this is a diagnostic probe, which is a different thing.")
+    ap.add_argument("--kernel", default="additive",
+                    choices=["additive", "product", "gibbs"],
+                    help="which kernel to profile. The recorded 'likelihood wants the "
+                         "radius at the grid edge' result was measured on ADDITIVE, "
+                         "which is no longer production. 'gibbs' profiles l(x) = m * "
+                         "sigma_k(x), the non-stationary kernel, with m=1 recalibrated "
+                         "per block to the same neighbour-count target so the grid stays "
+                         "comparable to the stationary profiles.")
+    ap.add_argument("--gibbs-k", type=int, default=10,
+                    help="k for sigma_k(x) under --kernel gibbs")
     ap.add_argument("--sv-grid", type=float, nargs="+", default=None,
                     help="multipliers on the signal variance, profiled JOINTLY with the "
                          "radius. The original run held sv fixed at prior_var/C, shared "
@@ -134,7 +212,10 @@ def main():
             mean = LinearEmbeddingMean().fit(Zm_tr, y_tr, size=msz)
             r_tr = y_tr - mean.predict(Zm_tr, size=msz)
         prior_var = float(np.var(r_tr))
-        sv0 = np.array([prior_var / len(KERNEL_CHAN)] * len(KERNEL_CHAN))
+        # the additive kernel splits the signal variance across channels so the diagonal
+        # stays var(y); product and Gibbs multiply, so the diagonal is sv once
+        sv0 = (np.array([prior_var / len(KERNEL_CHAN)] * len(KERNEL_CHAN))
+               if a.kernel == "additive" else np.array([prior_var]))
         sv_grid = np.array(a.sv_grid) if a.sv_grid else np.array([1.0])
         print(f"[lik] seed {seed} mean={a.mean}: var(residual)={prior_var:.3f}, "
               f"sv per channel={sv0[0]:.3f}, jitter={JITTER}")
@@ -153,6 +234,7 @@ def main():
         print(f"{'category':>18} {'n_train':>8} {'argmax m':>9} {'dlogL vs m=1':>14} "
               f"{'profile (logL - logL@1)':>26}")
         tot = 0.0
+        short_gibbs = {}
         for c in range(ncat):
             m = cat_tr == c
             n_c = int(m.sum())
@@ -161,10 +243,37 @@ def main():
                 continue
             Ds = [cdist(emb[n]["Ztr"][m], emb[n]["Ztr"][m]) for n in KERNEL_CHAN]
             rc = r_tr[m]
+            dims = [emb[n]["Ztr"].shape[1] for n in KERNEL_CHAN]
+            if a.kernel == "gibbs":
+                # sigma_k WITHIN the block: the kernel only ever sees same-category
+                # pairs, so the local density that matters is the one inside the family
+                sks = []
+                for D in Ds:
+                    Dk = D.copy(); np.fill_diagonal(Dk, np.inf)
+                    kk = min(a.gibbs_k, D.shape[0] - 1)
+                    sks.append(np.maximum(np.sort(Dk, axis=1)[:, kk - 1], 1e-12))
+                # A family with fewer rows than the neighbour target cannot reach it,
+                # so the bisection saturates, the block goes fully dense at every m, and
+                # the profile comes out identically flat -- which reads as "the
+                # likelihood is indifferent" when it actually means "the calibration
+                # failed". per_category_cutoffs already reduces K the same way.
+                tgt = min(K, n_c - 1)
+                if tgt < K:
+                    short_gibbs[c] = (n_c, tgt)
+                unit = gibbs_unit_scale(Ds, sks, tgt)
+                sp = float(np.percentile(sks[0], 90) / np.percentile(sks[0], 10))
+
+            def _ll(g, svv):
+                if a.kernel == "gibbs":
+                    return block_loglik_gibbs(Ds, sks, dims, unit * g, rc,
+                                              float(svv[0]), JITTER)
+                if a.kernel == "product":
+                    return block_loglik_product(Ds, cuts_cat[:, c] * g, rc,
+                                                float(svv[0]), JITTER)
+                return block_loglik(Ds, cuts_cat[:, c] * g, rc, svv, JITTER)
             # (radius multiplier) x (signal-variance multiplier); sv_grid is [1.0]
             # unless --sv-grid was given, which reproduces the original 1-D profile
-            LL = np.array([[block_loglik(Ds, cuts_cat[:, c] * g, rc, sv0 * s, JITTER)
-                            for g in GRID] for s in sv_grid])
+            LL = np.array([[_ll(g, sv0 * s) for g in GRID] for s in sv_grid])
             si, gi = np.unravel_index(int(np.nanargmax(LL)), LL.shape)
             # profile in the RADIUS at the best sv, referenced to (m=1, that same sv),
             # so the sparkline still answers "what does the radius want" rather than
@@ -172,9 +281,18 @@ def main():
             ll = LL[si]
             rel = ll - ll[GRID == 1.0][0]
             tot += rel[gi]
-            best_all.setdefault(c, []).append((GRID[gi], sv_grid[si]))
+            # A profile that is flat to within a nat is not an interior optimum, it is
+            # an uninformative block -- a family with fewer rows than the neighbour
+            # target is already fully dense at m=1 and widening cannot change anything.
+            # Counting its argmax as "not at the edge" would flatter the verdict.
+            flat = float(np.nanmax(np.abs(rel))) < 1.0
+            best_all.setdefault(c, []).append((GRID[gi], sv_grid[si], flat))
             spark = " ".join(f"{v:+.0f}" for v in rel)
             svcol = f" sv*{sv_grid[si]:<5.2f}" if len(sv_grid) > 1 else ""
+            if a.kernel == "gibbs":
+                svcol += (f" [l spread {sp:.2f}x"
+                          + (f", K={short_gibbs[c][1]}" if c in short_gibbs else "")
+                          + "]")
             print(f"{str(names[c]):>18} {n_c:>8} {GRID[gi]:>9.2f}{svcol} "
                   f"{rel[gi]:>+14.1f}   {spark}")
         print(f"{'TOTAL':>18} {'':>8} {'':>9} {tot:>+14.1f}   "
@@ -187,14 +305,22 @@ def main():
     print(f"mean rung = {a.mean}"
           + (f", sv grid = {list(sv_grid)}" if len(sv_grid) > 1 else ""))
     print(f"{'category':>18} {'argmax m per seed':>26} {'mean':>7} {'argmax sv':>22}")
-    n_edge = 0
+    n_edge = n_flat = 0
     for c in sorted(best_all):
         v = np.array([x[0] for x in best_all[c]])
         s = np.array([x[1] for x in best_all[c]])
-        n_edge += int(v.mean() >= GRID[-1])
+        is_flat = all(x[2] for x in best_all[c])
+        n_flat += int(is_flat)
+        n_edge += int((not is_flat) and v.mean() >= GRID[-1])
         sc = np.array2string(s) if len(sv_grid) > 1 else ""
-        print(f"{str(names[c]):>18} {np.array2string(v):>26} {v.mean():>7.2f} {sc:>22}")
-    print(f"\n  {n_edge}/{len(best_all)} categories pinned at the grid EDGE "
+        note = "  (FLAT: block already dense, uninformative)" if is_flat else ""
+        print(f"{str(names[c]):>18} {np.array2string(v):>26} {v.mean():>7.2f} "
+              f"{sc:>22}{note}")
+    n_use = len(best_all) - n_flat
+    if n_flat:
+        print(f"\n  {n_flat} categorie(s) excluded as uninformative: too few rows to "
+              f"reach the neighbour target, so the block is dense at every m.")
+    print(f"\n  {n_edge}/{n_use} INFORMATIVE categories pinned at the grid EDGE "
           f"(m={GRID[-1]}). A likelihood that rises monotonically to the boundary is "
           f"not identifying a radius -- it is saying 'wider', and MCMC over it would "
           f"report wherever the prior stops it.")
