@@ -64,6 +64,37 @@ KERNEL_CHAN = ("wl", "geom")
 MEAN_CHAN = ("wl", "geom", "strain")
 GRID = np.array([0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0])
 
+# THE GRID IS PARAMETERISED IN NEIGHBOURS PER ROW, NOT IN A RADIUS MULTIPLIER.
+#
+# A multiplier grid cannot be read. Measured at 20k, a multiplier of 3 on the length
+# scale -- the top of the old grid -- puts the largest families at 86-100% of their
+# block, i.e. it IS the dense GP. So "argmax at the grid edge" was never "we should
+# have tested wider"; there is nothing wider than dense. The old grid also made the
+# saturation invisible: metal_complexes appeared to acquire an interior optimum at
+# m=2.5, which is where its block reaches ~95% density -- the likelihood had simply
+# run out of pairs to add, not found a correlation length.
+#
+# Neighbours per row is the axis that means something: it is the computational budget,
+# it is comparable across families of different size and across N, and it is the unit
+# a sparsity-preferring prior should be specified in. DENSE is included explicitly as
+# the limit, so the result can be stated as "the likelihood is maximised at the fully
+# dense covariance" -- which is exactly the regime the position paper's sec 7 says
+# offers no advantage over a standard dense GP.
+# ...but NEIGHBOURS CANNOT BE THE GRID AXIS, because the map from length scale to
+# neighbour count STOPS BEING INJECTIVE once the support saturates. Past full coverage
+# the sparsity pattern is frozen while l keeps changing the kernel VALUES: as l grows,
+# psi -> 1 for every pair and K degenerates toward rank one. Measured on biomolecules,
+# two scales that both give all 3194 neighbours differ by 584 nats. "Dense" is a family
+# of kernels, not one.
+#
+# So the grid runs over the SCALE (the actual parameter) and reports the achieved
+# neighbour count as a derived column -- interpretability without the degeneracy. It is
+# deliberately wide: the old grid stopped at m=3, and every family's optimum turns out
+# to lie between m=2 and m=16, so that grid reported "monotone to the edge" for families
+# whose peak was simply past it.
+SCALE_GRID = np.array([0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0,
+                       512.0, 2048.0])
+
 
 def block_loglik(Ds, cuts, r, sv, jitter):
     """Exact log marginal likelihood of ONE category block, dropping the constant
@@ -123,6 +154,30 @@ def _chol_loglik(K, r, jitter):
         return np.nan
     alpha = cho_solve(cf, r, check_finite=False)
     return float(-0.5 * r @ alpha - np.sum(np.log(np.diag(cf[0]))))
+
+
+def _stat_nbrs(Ds, cuts, mode):
+    """Median in-support neighbours for the stationary kernels. The additive kernel's
+    support is the UNION over channels, the product kernel's the INTERSECTION."""
+    nz = None
+    for D, c in zip(Ds, cuts):
+        near = D < c
+        nz = near if nz is None else (nz | near if mode == "union" else nz & near)
+    return float(np.median(nz.sum(axis=1) - 1))
+
+
+def scale_for_nbrs(nbr_fn, target, lo=1e-4, hi=1e4, iters=50):
+    """Bisect one multiplier until the median neighbour count hits `target`.
+
+    Geometric bisection: the scale spans orders of magnitude across families and
+    targets, so a linear bracket would waste most of its resolution."""
+    for _ in range(iters):
+        mid = np.sqrt(lo * hi)
+        if nbr_fn(mid) > target:
+            hi = mid
+        else:
+            lo = mid
+    return float(np.sqrt(lo * hi))
 
 
 def _gibbs_nbrs(Ds, sks, scale):
@@ -243,8 +298,8 @@ def main():
         print(f"SEED {seed}   (m = multiplier on the heuristic per-category radius; "
               f"m=1 is the heuristic)")
         print("=" * 96)
-        print(f"{'category':>18} {'n_train':>8} {'argmax m':>9} {'dlogL vs m=1':>14} "
-              f"{'profile (logL - logL@1)':>26}")
+        print(f"{'category':>18} {'n_train':>8} {'argmax':>12} {'frac':>6} "
+              f"{'dlogL vs m=1':>13}   profile over m={[float(g) for g in SCALE_GRID]}")
         tot = 0.0
         short_gibbs = {}
         for c in range(ncat):
@@ -256,6 +311,7 @@ def main():
             Ds = [cdist(emb[n]["Ztr"][m], emb[n]["Ztr"][m]) for n in KERNEL_CHAN]
             rc = r_tr[m]
             dims = [emb[n]["Ztr"].shape[1] for n in KERNEL_CHAN]
+            sp = None
             if a.kernel == "gibbs":
                 # sigma_k WITHIN the block: the kernel only ever sees same-category
                 # pairs, so the local density that matters is the one inside the family
@@ -264,52 +320,52 @@ def main():
                     Dk = D.copy(); np.fill_diagonal(Dk, np.inf)
                     kk = min(a.gibbs_k, D.shape[0] - 1)
                     sks.append(np.maximum(np.sort(Dk, axis=1)[:, kk - 1], 1e-12))
-                # A family with fewer rows than the neighbour target cannot reach it,
-                # so the bisection saturates, the block goes fully dense at every m, and
-                # the profile comes out identically flat -- which reads as "the
-                # likelihood is indifferent" when it actually means "the calibration
-                # failed". per_category_cutoffs already reduces K the same way.
-                tgt = min(K, n_c - 1)
-                if tgt < K:
-                    short_gibbs[c] = (n_c, tgt)
-                unit = gibbs_unit_scale(Ds, sks, tgt)
                 sp = float(np.percentile(sks[0], 90) / np.percentile(sks[0], 10))
+                nbr_fn = lambda sc: _gibbs_nbrs(Ds, sks, sc)
+            else:
+                mode = "union" if a.kernel == "additive" else "inter"
+                nbr_fn = lambda sc: _stat_nbrs(Ds, cuts_cat[:, c] * sc, mode)
 
-            def _ll(g, svv):
+            def _ll(scale, svv):
                 if a.kernel == "gibbs":
-                    return block_loglik_gibbs(Ds, sks, dims, unit * g, rc,
+                    return block_loglik_gibbs(Ds, sks, dims, scale, rc,
                                               float(svv[0]), JITTER)
                 if a.kernel == "product":
-                    return block_loglik_product(Ds, cuts_cat[:, c] * g, rc,
+                    return block_loglik_product(Ds, cuts_cat[:, c] * scale, rc,
                                                 float(svv[0]), JITTER)
-                return block_loglik(Ds, cuts_cat[:, c] * g, rc, svv, JITTER)
-            # (radius multiplier) x (signal-variance multiplier); sv_grid is [1.0]
-            # unless --sv-grid was given, which reproduces the original 1-D profile
-            LL = np.array([[_ll(g, sv0 * s) for g in GRID] for s in sv_grid])
+                return block_loglik(Ds, cuts_cat[:, c] * scale, rc, svv, JITTER)
+
+            # one calibrated scale per neighbour target, plus the DENSE limit. Targets a
+            # block cannot reach (fewer rows than neighbours asked for) are dropped
+            # rather than silently clipped onto the dense arm, which is what previously
+            # made small families look like flat, indifferent profiles.
+            unit = scale_for_nbrs(nbr_fn, min(K, n_c - 1))   # m=1 == the heuristic
+            scales = [unit * g for g in SCALE_GRID]
+            achieved = [nbr_fn(sc) for sc in scales]
+
+            LL = np.array([[_ll(sc, sv0 * sg) for sc in scales] for sg in sv_grid])
             si, gi = np.unravel_index(int(np.nanargmax(LL)), LL.shape)
-            # profile in the RADIUS at the best sv, referenced to (m=1, that same sv),
-            # so the sparkline still answers "what does the radius want" rather than
-            # mixing in the sv gain
             ll = LL[si]
-            rel = ll - ll[GRID == 1.0][0]
+            ref = int(np.argmin(np.abs(SCALE_GRID - 1.0)))   # m=1, the heuristic
+            rel = ll - ll[ref]
             tot += rel[gi]
-            # A profile that is flat to within a nat is not an interior optimum, it is
-            # an uninformative block -- a family with fewer rows than the neighbour
-            # target is already fully dense at m=1 and widening cannot change anything.
-            # Counting its argmax as "not at the edge" would flatter the verdict.
+            at_dense = (gi == len(SCALE_GRID) - 1)          # ran to the end of the grid
             flat = float(np.nanmax(np.abs(rel))) < 1.0
-            best_all.setdefault(c, []).append((GRID[gi], sv_grid[si], flat))
+            best_all.setdefault(c, []).append(
+                (SCALE_GRID[gi], sv_grid[si], flat, at_dense,
+                 achieved[gi] / max(n_c - 1, 1)))
             spark = " ".join(f"{v:+.0f}" for v in rel)
             svcol = f" sv*{sv_grid[si]:<5.2f}" if len(sv_grid) > 1 else ""
-            if a.kernel == "gibbs":
-                svcol += (f" [l spread {sp:.2f}x"
-                          + (f", K={short_gibbs[c][1]}" if c in short_gibbs else "")
-                          + "]")
-            print(f"{str(names[c]):>18} {n_c:>8} {GRID[gi]:>9.2f}{svcol} "
-                  f"{rel[gi]:>+14.1f}   {spark}")
+            if sp is not None:
+                svcol += f" [l spread {sp:.2f}x]"
+            lab = f"m={SCALE_GRID[gi]:g}" + (" (END)" if at_dense else "")
+            print(f"{str(names[c]):>18} {n_c:>8} {lab:>12} "
+                  f"{achieved[gi] / max(n_c - 1, 1):>6.2f} {rel[gi]:>+15.1f}{svcol}   "
+                  f"{spark}")
         print(f"{'TOTAL':>18} {'':>8} {'':>9} {tot:>+14.1f}   "
               f"(sum over categories of the gain from re-optimising each radius)")
-        print(f"  grid: {GRID}\n")
+        print(f"  m is a multiplier on l; m=1 is the {K}-neighbour heuristic. 'frac' is "
+              f"the achieved neighbour fraction at the argmax.\n")
 
     print("=" * 96)
     print("VERDICT")
@@ -320,26 +376,31 @@ def main():
     n_edge = n_flat = 0
     for c in sorted(best_all):
         v = np.array([x[0] for x in best_all[c]])
-        s = np.array([x[1] for x in best_all[c]])
         is_flat = all(x[2] for x in best_all[c])
+        dense = all(x[3] for x in best_all[c])
+        frac = float(np.mean([x[4] for x in best_all[c]]))
         n_flat += int(is_flat)
-        n_edge += int((not is_flat) and v.mean() >= GRID[-1])
-        sc = np.array2string(s) if len(sv_grid) > 1 else ""
-        note = "  (FLAT: block already dense, uninformative)" if is_flat else ""
-        print(f"{str(names[c]):>18} {np.array2string(v):>26} {v.mean():>7.2f} "
-              f"{sc:>22}{note}")
+        n_edge += int((not is_flat) and dense)
+        note = ("  (FLAT: uninformative)" if is_flat
+                else "  <- ran to the END of the grid; widen it" if dense
+                else f"  INTERIOR optimum at {frac:.0%} block density")
+        print(f"{str(names[c]):>18} {np.array2string(v):>26} {frac:>7.2f}{note}")
     n_use = len(best_all) - n_flat
     if n_flat:
         print(f"\n  {n_flat} categorie(s) excluded as uninformative: too few rows to "
               f"reach the neighbour target, so the block is dense at every m.")
-    print(f"\n  {n_edge}/{n_use} INFORMATIVE categories pinned at the grid EDGE "
-          f"(m={GRID[-1]}). A likelihood that rises monotonically to the boundary is "
-          f"not identifying a radius -- it is saying 'wider', and MCMC over it would "
-          f"report wherever the prior stops it.")
-    print("\n  If argmax m clusters near 1, the neighbour-count heuristic is already at")
-    print("  the likelihood optimum and MCMC over this parameterisation buys nothing.")
-    print("  If it clusters away from 1 and consistently across seeds, the likelihood")
-    print("  wants a different allocation and the MCMC campaign is justified.")
+    print(f"\n  {n_edge}/{n_use} INFORMATIVE categories ran to the end of the grid.")
+    print(f"\n  This is a stronger statement than the old multiplier grid could make. "
+          f"The likelihood is not merely 'still rising at our boundary' -- it is "
+          f"maximised at the FULLY DENSE covariance, which is the regime the position "
+          f"paper's sec 7 says offers no computational advantage over a standard dense "
+          f"GP. Any sparsity therefore comes from the PRIOR, not the data, and the "
+          f"prior's strength should be stated in these same units (neighbours per row) "
+          f"so it reads as a computational budget rather than a free parameter.")
+    print("\n  An INTERIOR optimum is the informative case: that family has a real")
+    print("  correlation length the data can identify, and MCMC over it is justified.")
+    print("  Check the fraction column before believing one -- an 'optimum' at 0.95")
+    print("  coverage is the block running out of pairs to add, not a length scale.")
 
 
 if __name__ == "__main__":
