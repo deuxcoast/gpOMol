@@ -64,7 +64,7 @@ class ProductWendlandKernel:
     variance because the diagonal is a product of ones rather than a sum."""
 
     def __init__(self, channels, cats=None, device="cpu", dtype="float64",
-                 cutoffs_by_cat=None):
+                 cutoffs_by_cat=None, sv_by_cat=False):
         self.channels = [c if isinstance(c, ChannelSpec) else ChannelSpec(*c)
                          for c in channels]
         self.device, self.dtype = device, dtype
@@ -74,6 +74,11 @@ class ProductWendlandKernel:
         # the cross-category mask has cats1 == cats2, and every entry that does not is
         # zeroed below regardless of which radius produced it.
         self.cutoffs_by_cat = cutoffs_by_cat
+        # When True, hps is a length-n_cat vector of per-family signal variances instead
+        # of a single scalar, looked up by the ROW's category. Exact for the same reason
+        # cutoffs_by_cat is: every entry that survives the cross-category mask has
+        # cats1 == cats2, so row and column agree and the Gram stays symmetric.
+        self.sv_by_cat = sv_by_cat
 
     def __call__(self, x1, x2, hps):
         import torch
@@ -99,7 +104,12 @@ class ProductWendlandKernel:
             t = torch.clamp(D / cut, 0.0, 1.0)
             Kc = torch.where(t < 1.0, _wendland32(t), torch.zeros_like(t))
             Kp = Kp * Kc                       # INTERSECTION support
-        Kp = Kp * float(hps[0])
+        if self.sv_by_cat:
+            sv = torch.as_tensor(np.asarray(hps, dtype=float)[cats1], dtype=td,
+                                 device=dev).view(-1, 1)
+        else:
+            sv = float(hps[0])
+        Kp = Kp * sv
         ca = torch.as_tensor(cats1, device=dev).view(-1, 1)
         cb = torch.as_tensor(cats2, device=dev).view(1, -1)
         Kp = torch.where(ca == cb, Kp, torch.zeros_like(Kp))
@@ -179,6 +189,17 @@ def main():
                     help="rows in the driver-side density band. Each channel holds a "
                          "dense (sample x n_train) float64 block ON THE DRIVER: 0.6 GB at "
                          "20k but 6.4 GB at 200k, per channel. Lower to ~1000 at scale")
+    ap.add_argument("--percat-sv", action="store_true",
+                    help="per-family SIGNAL VARIANCE. Residual variance spans 8.2x "
+                         "across families (spice 2.89 -> elytes 23.59) and one global "
+                         "sv must compromise across all of them, which is why sigma*'s "
+                         "dynamic range is only p90/p10 = 1.24 -- nearly constant, and "
+                         "the reason its CRPS skill is 0.85%% against a plain "
+                         "dist-to-NN's 3.57%%. ALLOCATES, DOES NOT INFLATE: sv_c is "
+                         "scaled so the point-weighted mean still equals prior_var, so "
+                         "the total variance budget is unchanged and only its "
+                         "distribution moves -- the same control the density-matched "
+                         "radius arms use. PSD is free (block diagonal, PSD blocks).")
     ap.add_argument("--gibbs", action="store_true",
                     help="NON-STATIONARY: replace the fixed per-channel radius with a "
                          "Gibbs construction, l(x) = c[channel, family] * sigma_k(x), "
@@ -249,7 +270,7 @@ def main():
 
     for seed in a.seeds:
         tag = (("prodgibbs" if a.gibbs else "prodpercat" if a.percat else "product")
-               + chan_tag
+               + ("-svcat" if a.percat_sv else "") + chan_tag
                + ("" if a.mean == "M1" else "-M4"))
         out = os.path.join(a.out, f"{tag}_s{seed}.npz")
         if os.path.exists(out):
@@ -303,6 +324,21 @@ def main():
         mean = LinearEmbeddingMean().fit(Zm_tr, y_tr, size=msz)
         r_tr = y_tr - mean.predict(Zm_tr, size=msz)
         prior_var = float(np.var(r_tr))
+        sv_cat = None
+        if a.percat_sv:
+            # per-family residual variance, renormalised so the POINT-WEIGHTED mean is
+            # still prior_var. Without that renormalisation this would also change the
+            # total variance the model asserts, and any CRPS gain could be the diagonal
+            # moving rather than the allocation -- the same confound density matching
+            # exists to remove on the radius side.
+            vc = np.array([float(np.var(r_tr[cat_tr == c])) if (cat_tr == c).sum() > 1
+                           else prior_var for c in range(ncat)])
+            wc = np.array([float((cat_tr == c).sum()) for c in range(ncat)])
+            vc = np.maximum(vc, 1e-3 * prior_var)
+            sv_cat = prior_var * vc / (wc @ vc / max(wc.sum(), 1.0))
+            print(f"[prod] seed {seed}: per-family sv (mean-preserving), "
+                  f"spread {sv_cat.max() / sv_cat.min():.1f}x: "
+                  f"{np.array2string(np.round(sv_cat, 2))}", flush=True)
 
         # THE DENSITY TARGET IS THE BASELINE'S, NOT THIS ARM'S. Every arm is compared
         # against the additive union over KERNEL_CHAN (percat_radius.py --arm global),
@@ -438,9 +474,11 @@ def main():
         else:
             specs = [ChannelSpec(sl[0], sl[1], float(c))
                      for sl, c in zip(slices, cuts)]
-            kern = ProductWendlandKernel(specs, device=a.device, dtype="float64")
+            kern = ProductWendlandKernel(specs, device=a.device, dtype="float64",
+                                         sv_by_cat=a.percat_sv)
         if not a.gibbs:
-            hp_vec = np.array([prior_var], dtype=float)
+            hp_vec = (sv_cat.astype(float) if a.percat_sv
+                      else np.array([prior_var], dtype=float))
             Xk_tr = with_category_tag(Zk_tr, cat_tr)
             Xk_te = with_category_tag(Zk_te, cat_te)
 
@@ -511,6 +549,8 @@ def main():
                  nte=(len(te) if a.no_variance else a.nte),
                  has_variance=int(not a.no_variance),
                  diag_sample=a.diag_sample, kernel_chan=np.array(kchan),
+                 jitter=JITTER,
+                 sv_cat=(sv_cat if sv_cat is not None else np.array([prior_var])),
                  y=y_te[ev], mu=mu, err=err,
                  v_gp=v_gp, dnn=dnn, sd_cheap=sd_cheap, cat=cat_te[ev],
                  cuts_cat=(cuts if cuts.ndim == 2 else
