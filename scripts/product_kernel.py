@@ -189,6 +189,17 @@ def main():
                     help="rows in the driver-side density band. Each channel holds a "
                          "dense (sample x n_train) float64 block ON THE DRIVER: 0.6 GB at "
                          "20k but 6.4 GB at 200k, per channel. Lower to ~1000 at scale")
+    ap.add_argument("--sv-fit", default="plugin", choices=["plugin", "minus-noise"],
+                    help="how the signal variance is set. 'plugin' (historical) uses "
+                         "sv = var(residual) and then ADDS the jitter on top, so the "
+                         "model asserts var(r) + noise -- more variance than the "
+                         "residual actually has. That error GROWS WITH N: at 20k it is "
+                         "~7%% (15.0 asserted vs ~14 realised) and by 200k it is ~58%% "
+                         "(16.1 vs 10.2), because the GP gets genuinely better while "
+                         "prior_var, a property of the MEAN model, does not shrink. It "
+                         "is why std(z) goes 1.00 -> 0.795 and CRPS skill goes positive "
+                         "-> NEGATIVE between 20k and 200k. 'minus-noise' sets "
+                         "sv = var(r) - noise so the asserted total IS var(r).")
     ap.add_argument("--percat-sv", action="store_true",
                     help="per-family SIGNAL VARIANCE. Residual variance spans 8.2x "
                          "across families (spice 2.89 -> elytes 23.59) and one global "
@@ -270,7 +281,8 @@ def main():
 
     for seed in a.seeds:
         tag = (("prodgibbs" if a.gibbs else "prodpercat" if a.percat else "product")
-               + ("-svcat" if a.percat_sv else "") + chan_tag
+               + ("-svcat" if a.percat_sv else "")
+               + ("-mn" if a.sv_fit == "minus-noise" else "") + chan_tag
                + ("" if a.mean == "M1" else "-M4"))
         out = os.path.join(a.out, f"{tag}_s{seed}.npz")
         if os.path.exists(out):
@@ -324,6 +336,13 @@ def main():
         mean = LinearEmbeddingMean().fit(Zm_tr, y_tr, size=msz)
         r_tr = y_tr - mean.predict(Zm_tr, size=msz)
         prior_var = float(np.var(r_tr))
+        # what the model should assert in total, per point, at an uncovered location
+        sv_tot = (max(prior_var - JITTER, 0.05 * prior_var) if a.sv_fit == "minus-noise"
+                  else prior_var)
+        if a.sv_fit == "minus-noise":
+            print(f"[prod] seed {seed}: sv-fit=minus-noise -> sv {prior_var:.3f} -> "
+                  f"{sv_tot:.3f} so sv+jitter={sv_tot + JITTER:.3f} matches "
+                  f"var(residual)={prior_var:.3f}", flush=True)
         sv_cat = None
         if a.percat_sv:
             # per-family residual variance, renormalised so the POINT-WEIGHTED mean is
@@ -335,7 +354,13 @@ def main():
                            else prior_var for c in range(ncat)])
             wc = np.array([float((cat_tr == c).sum()) for c in range(ncat)])
             vc = np.maximum(vc, 1e-3 * prior_var)
-            sv_cat = prior_var * vc / (wc @ vc / max(wc.sum(), 1.0))
+            if a.sv_fit == "minus-noise":
+                # per family the target is var_c, so sv_c = var_c - noise directly;
+                # no budget renormalisation, because the budget itself is what is
+                # being corrected
+                sv_cat = np.maximum(vc - JITTER, 0.05 * vc)
+            else:
+                sv_cat = prior_var * vc / (wc @ vc / max(wc.sum(), 1.0))
             print(f"[prod] seed {seed}: per-family sv (mean-preserving), "
                   f"spread {sv_cat.max() / sv_cat.min():.1f}x: "
                   f"{np.array2string(np.round(sv_cat, 2))}", flush=True)
@@ -478,7 +503,7 @@ def main():
                                          sv_by_cat=a.percat_sv)
         if not a.gibbs:
             hp_vec = (sv_cat.astype(float) if a.percat_sv
-                      else np.array([prior_var], dtype=float))
+                      else np.array([sv_tot], dtype=float))
             Xk_tr = with_category_tag(Zk_tr, cat_tr)
             Xk_te = with_category_tag(Zk_te, cat_te)
 

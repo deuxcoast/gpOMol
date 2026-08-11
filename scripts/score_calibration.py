@@ -76,6 +76,25 @@ def _erfinv(x):
     return erfinv(x)
 
 
+def split_scale(err, sd, seed=0):
+    """Fit ONE scalar multiplier on sigma using half the points; return it plus the
+    other half's index, so scoring is out-of-sample.
+
+    WHY THIS IS NOT OPTIONAL. CRPS punishes a badly SCALED sigma and a badly SHAPED one
+    together, and the two have different fixes. Measured at 200k: sv is set to the MEAN
+    model's residual variance with the jitter added on top, so the model asserts ~58%
+    more variance than the errors have, std(z) falls to 0.795, and CRPS skill goes
+    NEGATIVE -- while the per-family sv lever underneath it is still worth +2.1 points.
+    Reporting only the unscaled number would have called a working lever a failure.
+    The original calibration work did exactly this and score_calibration dropped it."""
+    rng = np.random.default_rng(seed)
+    p = rng.permutation(len(err))
+    h1, h2 = p[:len(p) // 2], p[len(p) // 2:]
+    # the CRPS-optimal scalar for a Gaussian is the one matching realised RMS z
+    a = float(np.sqrt(np.mean((err[h1] / np.maximum(sd[h1], 1e-12)) ** 2)))
+    return a, h2
+
+
 def report(d, noise, label):
     y, mu, v = d["y"], d["mu"], np.maximum(d["v_gp"], 0.0)
     err = y - mu
@@ -91,8 +110,17 @@ def report(d, noise, label):
         )
     mse = float(np.mean(err ** 2))
     flat = float(np.mean(crps_gaussian(y, mu, np.full(len(y), np.sqrt(mse)))))
+    # SCALE-FREE skill: every candidate gets its own best global scale on one half and
+    # is scored on the other, so this measures the SHAPE of sigma alone.
+    sd = np.sqrt(v + noise)
+    a, h2 = split_scale(err, sd)
+    af, _ = split_scale(err, np.full(len(err), np.sqrt(mse)))
+    c_gp = float(np.mean(crps_gaussian(y[h2], mu[h2], a * sd[h2])))
+    c_fl = float(np.mean(crps_gaussian(y[h2], mu[h2],
+                                       np.full(len(h2), af * np.sqrt(mse)))))
     return dict(rows=rows, mse=mse, rmse=np.sqrt(mse), mae=float(np.mean(np.abs(err))),
-                r2=float(r2_score(y, mu)), crps_flat=flat, n=len(y), label=label)
+                r2=float(r2_score(y, mu)), crps_flat=flat, n=len(y), label=label,
+                skill_scaled=100.0 * (c_fl - c_gp) / c_fl, alpha=a)
 
 
 def main():
@@ -151,11 +179,19 @@ def main():
     print("  CRPS_flat uses the SAME mu with one variance for every point (= MSE), so it")
     print("  isolates what the per-point sigma is worth. Negative skill = the GP's")
     print("  varying sigma is worse than no sigma model at all.")
-    print("%-26s %9s %9s %10s" % ("arm", "CRPS", "CRPS_flat", "skill"))
+    print("  'skill' is as-is; 'scale-free' gives EVERY candidate its own best global")
+    print("  sigma scale on half the points and scores on the other half, so it isolates")
+    print("  the SHAPE of sigma. alpha is the fitted multiplier: alpha<1 means the model")
+    print("  asserted too much variance, >1 too little. They diverge when the variance")
+    print("  is mis-SCALED rather than mis-shaped, which is a different bug with a")
+    print("  different fix.")
+    print("%-26s %9s %9s %8s %11s %7s"
+          % ("arm", "CRPS", "CRPS_flat", "skill", "scale-free", "alpha"))
     for r in res:
         c = r["rows"]["+ noise"]["crps"]
-        sk = (r["crps_flat"] - c) / r["crps_flat"]
-        print("%-26s %9.4f %9.4f %9.1f%%" % (r["label"], c, r["crps_flat"], 100 * sk))
+        sk = 100 * (r["crps_flat"] - c) / r["crps_flat"]
+        print("%-26s %9.4f %9.4f %7.1f%% %10.2f%% %7.3f"
+              % (r["label"], c, r["crps_flat"], sk, r["skill_scaled"], r["alpha"]))
 
 
 if __name__ == "__main__":
