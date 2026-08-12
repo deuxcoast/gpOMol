@@ -69,6 +69,38 @@ def variogram_stats(Z, r, cat, n_bins=12, sample=2500, seed=0):
     return float(np.mean(nug)), float(np.mean(dri))
 
 
+def gamma_by_rank(Z, r, cat, ks=(1, 10, 200), sample=1500, seed=0):
+    """Semivariance at the k-th nearest SAME-FAMILY neighbour, divided by the sill.
+
+    WHY THIS REPLACED THE BINNED NUGGET AS THE HEADLINE. `variogram_stats` uses 12
+    equal-count bins, so its first bin averages each point's nearest ~n/12 neighbours --
+    about 200 at a 2500-point sample. That is a coarse average masquerading as a
+    near-neighbour measurement, and it hid a real effect: a pretrained GNN embedding is
+    26% better than ours at k=1 (0.497 vs 0.667) but only 9% better by k=200, and the
+    binned nugget reported the 9%. The conclusion drawn from it ("a learned
+    representation barely moves the floor") was an artifact of the measurement scale.
+
+    Report the curve. gamma(1) is resolution at the finest scale; gamma(200) is the
+    scale our kernel actually operates at, since it targets 200 in-support neighbours."""
+    rng = np.random.default_rng(seed)
+    out = {k: [] for k in ks}
+    for c in np.unique(cat):
+        idx = np.where(cat == c)[0]
+        if len(idx) < 150:
+            continue
+        idx = rng.choice(idx, size=min(sample, len(idx)), replace=False)
+        D = cdist(Z[idx], Z[idx])
+        np.fill_diagonal(D, np.inf)
+        order = np.argsort(D, axis=1)
+        sill = float(np.var(r[idx]))
+        for k in ks:
+            if k >= len(idx):
+                continue
+            nb = order[:, k - 1]
+            out[k].append(0.5 * float(np.mean((r[idx] - r[idx][nb]) ** 2)) / sill)
+    return {k: (float(np.mean(v)) if v else float("nan")) for k, v in out.items()}
+
+
 def knn_r2(Ztr, Zte, r_tr, r_te, cat_tr, cat_te, k=10, sample=1500, seed=0):
     """Held-out k-NN R^2 over same-category neighbours -- the second screening axis."""
     rng = np.random.default_rng(seed)
@@ -167,23 +199,32 @@ def main():
     print("    -> nested; truncation is equivalent to refitting, sweep is valid\n")
 
     dims = [d for d in a.dims if d <= a.rank]
-    print(f"{'dims/chan':>10} {'total':>7} {'NUGGET':>9} {'drift':>8} {'kNN R2':>9}")
-    print("-" * 48)
+    print("  g(k) = semivariance at the k-th nearest same-family neighbour / sill.")
+    print("  g(1) is resolution at the finest scale; g(200) is where the kernel actually")
+    print("  operates (it targets 200 in-support neighbours). 'binned' is the old coarse")
+    print("  first-bin average, kept for continuity -- it averages ~200 neighbours and so")
+    print("  tracks g(200), not g(1).\n")
+    print(f"{'dims/chan':>10} {'total':>7} {'g(1)':>8} {'g(10)':>8} {'g(200)':>8} "
+          f"{'binned':>8} {'drift':>7} {'kNN R2':>8}")
+    print("-" * 72)
     rows = []
     for k in dims:
         Ztr = np.hstack([E[f"{n}_tr"][:, :k] for n in KERNEL_CHAN])
         Zte = np.hstack([E[f"{n}_te"][:, :k] for n in KERNEL_CHAN])
         nug, dri = variogram_stats(Ztr, r_tr, cat_tr)
+        g = gamma_by_rank(Ztr, r_tr, cat_tr)
         kr = knn_r2(Ztr, Zte, r_tr, r_te, cat_tr, cat_te)
-        rows.append((k, nug, dri, kr))
-        print(f"{k:>10} {k * len(KERNEL_CHAN):>7} {nug:>9.4f} {dri:>8.3f} {kr:>9.4f}")
+        rows.append((k, nug, dri, kr, g[1], g[10], g[200]))
+        print(f"{k:>10} {k * len(KERNEL_CHAN):>7} {g[1]:>8.4f} {g[10]:>8.4f} "
+              f"{g[200]:>8.4f} {nug:>8.4f} {dri:>7.3f} {kr:>8.4f}")
     R = np.array(rows)
     np.savez(a.out, dims=R[:, 0], nugget=R[:, 1], drift=R[:, 2], knn_r2=R[:, 3],
-             n=a.n, seed=a.seed, rank=a.rank)
-    best = int(np.argmin(R[:, 1]))
-    print(f"\n  lowest nugget {R[best, 1]:.4f} at {int(R[best, 0])} dims/channel "
-          f"(production is 10, nugget {R[dims.index(10), 1]:.4f})"
-          if 10 in dims else "")
+             g1=R[:, 4], g10=R[:, 5], g200=R[:, 6], n=a.n, seed=a.seed, rank=a.rank)
+    best = int(np.argmin(R[:, 4]))
+    if 10 in dims:
+        j = dims.index(10)
+        print(f"\n  lowest g(1) {R[best, 4]:.4f} at {int(R[best, 0])} dims/channel "
+              f"(production is 10 dims, g(1) {R[j, 4]:.4f})")
     print("  A falling nugget only counts if kNN R^2 holds up: a descriptor can lower it")
     print("  by smearing molecules together, which helps the variogram and nothing else.")
     print(f"  -> {a.out}")
